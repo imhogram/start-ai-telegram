@@ -123,20 +123,37 @@ function pickPhone(t) {
   return m.sort((a,b)=> (b.match(/\d/g)||[]).length - (a.match(/\d/g)||[]).length)[0].trim();
 }
 
+// ==== Топики тем ====
+const TOPIC_PATTERNS = [
+  { re: /(масштаб|идея\s*рост|запус\s*бизнес|growth|scale)/i, topic: "Масштабирование идеи" },
+  { re: /(маркетинг(овый)?\s*анализ|рынок|конкурент|цена|target\s*market)/i, topic: "Маркетинговый анализ" },
+  { re: /(финанс(овый)?\s*анализ|рентабельн|убытк|управленческ.*отчет)/i, topic: "Финансовый анализ" },
+  { re: /(финанс(овый)?\s*план|прогноз доход|расход|точка безубыт|sensitivity)/i, topic: "Финансовый план" },
+  { re: /(бизнес.?план|открыт.?бизнес|bp\s*project|swot)/i, topic: "Бизнес-план" },
+  { re: /(презентац(ия)? для инвест|investor pitch|pitch deck)/i, topic: "Презентация для инвестора" },
+  { re: /(инвестиц|инвестор|investment|invest)/i, topic: "Привлечение инвестиций" },
+  { re: /(стратегия развития|mission|vision|миссия|задачи компании)/i, topic: "Стратегия развития" },
+  { re: /(концепц(ия)? работы|позиционирование|pr.?акц|имиджев.*продукц|медиа.?план)/i, topic: "Концепция работы компании" },
+  { re: /(бизнес.?процесс|оптимизац|автоматизац(ия)?|регламент|карта процессов|crm)/i, topic: "Бизнес-процессы/автоматизация" },
+  { re: /(логотип|logo|фирменн(ый)? стиль|brand identity)/i, topic: "Логотип и фирменный стиль" },
+  { re: /(брендбук|brand.?book|гайдлайн)/i, topic: "Брендбук" },
+  { re: /(сайт|лендинг|landing|веб.?сайт|web\s*site|site)/i, topic: "Разработка сайта" },
+  { re: /(реклам(а)? в интернете|google.?ads|таргет|2гис|olx|контекст|cpc|ppc)/i, topic: "Реклама в интернете" },
+  { re: /(smm|инстаграм|instagram|ведение\s*профиля|контент.?план|stories|reels)/i, topic: "SMM ведение" },
+  { re: /(отдел продаж|sales dept|скрипт|холодн.*звон|kpi|crm продажи)/i, topic: "Отдел продаж" },
+  { re: /(crm|битрикс|bitrix|автоматизац|сквозн.*аналитик|chat.?bot|ии.?бот)/i, topic: "CRM, автоматизация, ИИ" },
+  { re: /(франшиз|franchise|франчайзинг)/i, topic: "Франчайзинг" },
+];
+
 function guessTopicFrom(userText, lastAssistant = "") {
   const u = (userText || "").toLowerCase();
   const a = (lastAssistant || "").toLowerCase();
-  const patterns = [
-    { re: /(фирстил|фирстиль|фирменн(ый|ого)?\s*стил|бренд(инг)?|логотип|логотипы|гайдлайн|brandbook|брендбук)/,  topic: "Фирменный стиль/брендинг" },
-    { re: /(сайт|лендинг|landing|web\s*site|веб[-\s]?сайт)/,                                             topic: "Сайт/лендинг" },
-    { re: /(ии|чат.?бот|ai.?bot|жасанды интеллект)/,                                                    topic: "ИИ-чатботы" },
-    { re: /(маркетинг|реклама|таргет|instagram|google\s*ads|smm)/,                                      topic: "Маркетинг/реклама" },
-    { re: /(бизнес[-\s]?процесс|автоматизац|crm)/,                                                      topic: "Бизнес-процессы/автоматизация" },
-  ];
-  // 1) пытаемся найти в сообщении пользователя
-  for (const p of patterns) if (p.re.test(u)) return p.topic;
-  // 2) если не нашли — смотрим подсказки из последнего ответа ассистента
-  for (const p of patterns) if (p.re.test(a)) return p.topic;
+
+  // 1) Проверяем текст пользователя
+  for (const p of TOPIC_PATTERNS) if (p.re.test(u)) return p.topic;
+  // 2) Если нет — пробуем последний ответ ассистента
+  for (const p of TOPIC_PATTERNS) if (p.re.test(a)) return p.topic;
+
   return "Консультация";
 }
 

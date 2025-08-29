@@ -22,32 +22,44 @@ async function readBody(req) {
   });
 }
 
-// ==== Работа с историей диалога ====
+// ==== Работа с историей диалога (устойчиво к типам) ====
+function safeParseItem(item) {
+  if (item == null) return null;
+  if (typeof item === "object") return item; // уже объект
+  if (typeof item === "string") {
+    try { return JSON.parse(item); } catch { return null; }
+  }
+  return null;
+}
+
 async function getHistory(chatId) {
   const items = await redis.lrange(`hist:${chatId}`, -HISTORY_LEN, -1);
-  return (items || []).map(x => JSON.parse(x));
+  return (items || []).map(safeParseItem).filter(Boolean);
 }
+
 async function pushHistory(chatId, role, content) {
-  await redis.rpush(`hist:${chatId}`, JSON.stringify({ role, content }));
+  const entry = { role, content };
+  await redis.rpush(`hist:${chatId}`, JSON.stringify(entry));
   await redis.ltrim(`hist:${chatId}`, -HISTORY_LEN, -1);
 }
 
 // ==== Простая "машина состояний" записи на консультацию (слоты) ====
 async function getBooking(chatId) {
-  return (
-    (await redis.get(`book:${chatId}`)) || {
-      stage: null,
-      topic: null,
-      when: null,
-      name: null,
-      phone: null,
-    }
-  );
+  const val = await redis.get(`book:${chatId}`);
+  if (!val) {
+    return { stage: null, topic: null, when: null, name: null, phone: null };
+  }
+  if (typeof val === "object") return val; // если уже объект
+  try { return JSON.parse(val); } catch {
+    return { stage: null, topic: null, when: null, name: null, phone: null };
+  }
 }
+
 async function setBooking(chatId, data) {
-  // TTL 1 день
-  await redis.set(`book:${chatId}`, data, { ex: 60 * 60 * 24 });
+  // TTL 1 день, сохраняем JSON-строку
+  await redis.set(`book:${chatId}`, JSON.stringify(data), { ex: 60 * 60 * 24 });
 }
+
 async function clearBooking(chatId) {
   await redis.del(`book:${chatId}`);
 }
@@ -95,7 +107,21 @@ export default async function handler(req, res) {
 
     const chatId = message.chat.id;
     const userText = (message.text || "").trim();
-
+    
+    // ===== Команда очистки истории =====
+    if (userText === "/reset") {
+      await redis.del(`hist:${chatId}`);
+      await redis.del(`book:${chatId}`);
+      const msg = "История и запись очищены. Начнём заново.";
+      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, text: msg })
+      });
+      res.statusCode = 200;
+      return res.end(JSON.stringify({ ok: true }));
+    }
+    
     // ===== Мини-роутер: слоты записи на консультацию =====
     const booking = await getBooking(chatId);
     let handled = false;

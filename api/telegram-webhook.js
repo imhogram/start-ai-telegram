@@ -96,7 +96,7 @@ function isTimeLike(t) {
   if (/через\s+\d+\s*(час(а|ов)?|мин(ут)?)/.test(s)) return true;       // через 2 часа / через 30 мин
   if (/(now|right now)/.test(s)) return true;
   // рус/каз/анг ключевые слова
-  if (/\b(сейчас|вечер|утро|день|сегодня|завтра|послезавтра)\b/.test(s)) return true;
+  if (/\b(сейчас|вечер|вечером|утро|утром|день|днем|сегодня|завтра|послезавтра)\b/.test(s)) return true;
   if (/\b(қазір|кешке|таңертең|түсте|бүгін|ертең)\b/.test(s)) return true;
   if (/\b(today|tomorrow|evening|morning|afternoon)\b/.test(s)) return true;
   // форматы времени/даты
@@ -451,6 +451,7 @@ export default async function handler(req, res) {
     if (userText === "/reset") {
       await redis.del(`hist:${chatId}`);
       await redis.del(`book:${chatId}`);
+      await clearContact(chatId); // <— ДОБАВИЛИ
       const current = (await redis.get(LANG_KEY(chatId))) || detectLang(userText) || "ru";
       await sendTG(chatId, L.resetDone[current] || L.resetDone.ru);
       res.statusCode = 200;
@@ -483,12 +484,58 @@ export default async function handler(req, res) {
       return res.end(JSON.stringify({ ok: true }));
     }
 
+    // ==== Профиль контакта (кэшируем имя/телефон на 30 дней) ====
+    async function getContact(chatId) {
+      const v = await redis.get(`contact:${chatId}`);
+      if (!v) return null;
+      try { return typeof v === "string" ? JSON.parse(v) : v; } catch { return null; }
+    }
+    async function setContact(chatId, { name, phone }) {
+      await redis.set(`contact:${chatId}`, JSON.stringify({ name, phone }), { ex: 60 * 60 * 24 * 30 });
+    }
+    async function clearContact(chatId) {
+      await redis.del(`contact:${chatId}`);
+    }
+    
     // ===== Слоты записи =====
 const booking = await getBooking(chatId);
 let handled = false;
 let preReply = null;
 
-const bookTrigger = /консультац|запис|қабылда|кеңес|consult|booking/i;
+// === REUSE CONTACT: если контакт уже есть, а пользователь пишет про новую услугу — шлём лид без запроса телефона ===
+const contact = await getContact(chatId);
+if (!booking.stage && contact?.phone && !hasPhone(userText)) {
+  // Подсказка темы только из текста пользователя; если нет — не создаём лид, чтобы не спамить
+  const hist  = await getHistory(chatId);
+  const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
+  const topicFromMsg = guessTopicFrom(userText, ""); // приоритет только по userText
+  if (topicFromMsg && topicFromMsg !== "Консультация") {
+    const when = isTimeLike(userText) ? userText : "-";
+
+    // 1) Пользователю — обычный ответ
+    preReply = L.booked[lang] || L.booked.en;
+
+    // 2) Админу — новая заявка по новой теме
+    const adminId = getAdminId();
+    if (adminId) {
+      const adminMsg =
+        `🆕 Новая заявка чатбота:\n` +
+        `Тема: ${topicFromMsg}\n` +
+        `Время: ${when}\n` +
+        `Имя: ${contact.name || "-"}\n` +
+        `Телефон: ${contact.phone || "-"}\n` +
+        `Источник: tg chat_id ${chatId}`;
+      const r = await sendTG(adminId, adminMsg);
+      if (!r.ok) console.error("Failed to send reused-contact lead to admin:", adminId);
+    } else {
+      console.error("ADMIN_CHAT_ID is not set or empty");
+    }
+
+    handled = true;
+  }
+}
+    
+const bookTrigger = /консультац|запис|менеджер|поговор|қабылда|кеңес|consult|booking/i;
 
 // ONE-SHOT: если пользователь сразу прислал телефон (и текст), создаём лид без запуска слотов
 if (!booking.stage && hasPhone(userText)) {
@@ -525,10 +572,11 @@ if (!booking.stage && hasPhone(userText)) {
     console.error("ADMIN_CHAT_ID is not set or empty");
   }
 
+  await setContact(chatId, { name, phone }); // <— сохранить контакт
+  
   await clearBooking(chatId);
   handled = true;
 }
-  
     // обычный запуск слотов по ключевым словам
 else if (!booking.stage && bookTrigger.test(userText)) {
   // ... (твой текущий код автоподхвата темы и перехода к when)  
@@ -613,6 +661,8 @@ else if (!booking.stage && bookTrigger.test(userText)) {
           console.error("ADMIN_CHAT_ID is not set or empty");
         }
 
+        await setContact(chatId, { name: booking.name, phone: booking.phone }); // <— сохранить контакт
+        
         await clearBooking(chatId);
       } else {
         preReply = (lang === "kz")

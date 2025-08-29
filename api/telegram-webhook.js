@@ -381,7 +381,7 @@ export default async function handler(req, res) {
         return res.end(JSON.stringify({ ok: true }));
       } else {
         const current = (await redis.get(LANG_KEY(chatId))) || detectLang(userText);
-        await sendTG(chatId, L.unknownLang[current] || L.unknownLang.en);
+        await sendTG(chatId, L.unknownLang[current] || L.unknownLang.ru);
         res.statusCode = 200;
         return res.end(JSON.stringify({ ok: true }));
       }
@@ -476,18 +476,26 @@ else if (booking.stage === "phone" && /[\d+\-\s()]{6,}/.test(userText)) {
   preReply = (L.confirm(booking, lang)) || L.confirm(booking, "en");
   handled = true;
 }
+  
 else if (booking.stage === "confirm" && yesRegex.test(userText)) {
   preReply = L.booked[lang] || L.booked.en;
-  // Отправка админу
-  const adminMsg = `🆕 Новая заявка чатбота:\n` +
-    `Тема: ${booking.topic}\n` +
-    `Время: ${booking.when}\n` +
-    `Имя: ${booking.name}\n` +
-    `Телефон: ${booking.phone}`;
-  await sendTG(process.env.ADMIN_CHAT_ID, adminMsg);
+  // Отправка админу (если настроен)
+  if (process.env.ADMIN_CHAT_ID) {
+    const adminMsg =
+      `🆕 Новая заявка чатбота:\n` +
+      `Тема: ${booking.topic}\n` +
+      `Время: ${booking.when}\n` +
+      `Имя: ${booking.name}\n` +
+      `Телефон: ${booking.phone}\n` +
+      `Источник: tg chat_id ${chatId}`;
+    await sendTG(process.env.ADMIN_CHAT_ID, adminMsg);
+  } else {
+    console.error("ADMIN_CHAT_ID is not set");
+  }
   await clearBooking(chatId);
   handled = true;
 }
+    
 if (handled && preReply) {
   await pushHistory(chatId, "user", userText);
   await pushHistory(chatId, "assistant", preReply);

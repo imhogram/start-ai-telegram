@@ -398,7 +398,8 @@ export default async function handler(req, res) {
     }
 
     // 3) Вычисляем язык (приоритет: сохранённый → авто-детект текущего текста)
-    let lang = (await redis.get(LANG_KEY(chatId))) || detectLang(userText);
+    let lang = (await redis.get(LANG_KEY(chatId))) || detectLang(userText) || "ru";
+    if (!lang) lang = "ru";
     // Обновим TTL языка на месяц
     await redis.set(LANG_KEY(chatId), lang, { ex: 60 * 60 * 24 * 30 });
 
@@ -471,10 +472,16 @@ else if (booking.stage === "phone" && /[\d+\-\s()]{6,}/.test(userText)) {
 }
 else if (booking.stage === "confirm" && yesRegex.test(userText)) {
   preReply = L.booked[lang] || L.booked.en;
+  // Отправка админу
+  const adminMsg = `🆕 Новая заявка чатбота:\n` +
+    `Тема: ${booking.topic}\n` +
+    `Время: ${booking.when}\n` +
+    `Имя: ${booking.name}\n` +
+    `Телефон: ${booking.phone}`;
+  await sendTG(process.env.ADMIN_CHAT_ID, adminMsg);
   await clearBooking(chatId);
   handled = true;
 }
-
 if (handled && preReply) {
   await pushHistory(chatId, "user", userText);
   await pushHistory(chatId, "assistant", preReply);

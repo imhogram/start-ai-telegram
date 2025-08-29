@@ -104,9 +104,25 @@ function isNameLike(t) {
   const words = t.trim().split(/\s+/);
   return /[A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі]/.test(t) && words.length <= 3 && t.length <= 40;
 }
-// >=11 цифр — считаем валидным телефоном (оставляем твой критерий)
+// >=6 цифр — считаем валидным телефоном
 function phoneOk(t) {
-  return ((t.match(/\d/g) || []).length) >= 11;
+  return ((t.match(/\d/g) || []).length) >= 6;
+}
+
+function hasPhone(t) { return ((t.match(/\d/g) || []).length) >= 6; }
+function pickPhone(t) {
+  const m = t.match(/[\+\d][\d\-\s().]{5,}/g);
+  if (!m) return null;
+  // берём самую длинную «похожую на номер» подстроку
+  return m.sort((a,b)=> (b.match(/\d/g)||[]).length - (a.match(/\d/g)||[]).length)[0].trim();
+}
+function guessTopicFrom(text, lastAssistant = "") {
+  const src = (text + " " + lastAssistant).toLowerCase();
+  if (/ии|чат.?бот|ai.?bot|жасанды интеллект/.test(src)) return "ИИ-чатботы";
+  if (/сайт|лендинг|landing|web\s*site/.test(src)) return "Сайт/лендинг";
+  if (/маркетинг|реклама|таргет|instagram|google\s*ads/.test(src)) return "Маркетинг/реклама";
+  if (/бизнес[-\s]?процесс|автоматизац/.test(src)) return "Бизнес-процессы/автоматизация";
+  return "Консультация";
 }
 
 // ==== Локализация служебных фраз ====
@@ -453,14 +469,51 @@ export default async function handler(req, res) {
     }
 
     // ===== Слоты записи =====
-    const booking = await getBooking(chatId);
-    let handled = false;
-    let preReply = null;
+const booking = await getBooking(chatId);
+let handled = false;
+let preReply = null;
 
-    const bookTrigger = /консультац|запис|қабылда|кеңес|consult|booking/i;
+const bookTrigger = /консультац|запис|қабылда|кеңес|consult|booking/i;
 
-    if (!booking.stage && bookTrigger.test(userText)) {
-      // Попробуем взять тему из последнего ответа ассистента
+// ONE-SHOT: если пользователь сразу прислал телефон (и текст), создаём лид без запуска слотов
+if (!booking.stage && hasPhone(userText)) {
+  const phone  = pickPhone(userText);
+  // возьмём подсказку темы из последнего ответа ассистента или самого сообщения
+  const hist   = await getHistory(chatId);
+  const lastA  = hist.filter(h => h.role === "assistant").slice(-1)[0];
+  const topic  = guessTopicFrom(userText, lastA?.content || "");
+  const when   = isTimeLike(userText) ? userText : "-";
+  // имя попробуем выдрать как слово без цифр до первой запятой/«телефон»
+  const nameCandidate = userText.split(/[,|;]|тел(ефон)?/i)[0].trim();
+  const name  = isNameLike(nameCandidate) ? nameCandidate : "-";
+
+  // 1) сообщение пользователю
+  preReply = L.booked[lang] || L.booked.en;
+
+  // 2) отправка админу
+  const adminId = getAdminId();
+  if (adminId) {
+    const adminMsg =
+      `🆕 Новая заявка чатбота:\n` +
+      `Тема: ${topic}\n` +
+      `Время: ${when}\n` +
+      `Имя: ${name}\n` +
+      `Телефон: ${phone}\n` +
+      `Источник: tg chat_id ${chatId}`;
+    const r = await sendTG(adminId, adminMsg);
+    if (!r.ok) console.error("Failed to send one-shot lead to admin:", adminId);
+  } else {
+    console.error("ADMIN_CHAT_ID is not set or empty");
+  }
+
+  // чистим состояние на всякий
+  await clearBooking(chatId);
+  handled = true;
+}
+// обычный запуск слотов по ключевым словам
+else if (!booking.stage && bookTrigger.test(userText)) {
+  // ... (твой текущий код автоподхвата темы и перехода к when)  
+  // Попробуем взять тему из последнего ответа ассистента
       const hist = await getHistory(chatId);
       const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
       let autoTopic = null;

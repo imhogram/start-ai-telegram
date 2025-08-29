@@ -80,6 +80,11 @@ function detectLang(text) {
   return "en";
 }
 
+// >=11 цифр — считаем валидным телефоном
+function phoneOk(t) {
+  return ((t.match(/\d/g) || []).length) >= 11;
+}
+
 // ==== Локализация служебных фраз ====
 const L = {
   hi: {
@@ -426,10 +431,12 @@ const booking = await getBooking(chatId);
 let handled = false;
 let preReply = null;
 
-// принимай подтверждение на любом языке + с запятой/точкой/пробелом
-const yesRegex = /^(да|давай|ок|иә|иа|ия|yes|ok)\b/i;
-    
 const bookTrigger = /консультац|запис|қабылда|кеңес|consult|booking/i;
+
+// хелпер для телефона: >=11 цифр
+function phoneOk(t) {
+  return ((t.match(/\d/g) || []).length) >= 11;
+}
 
 if (!booking.stage && bookTrigger.test(userText)) {
   // Попробуем взять тему из последнего ответа ассистента
@@ -443,7 +450,6 @@ if (!booking.stage && bookTrigger.test(userText)) {
     else if (/сайт|лендинг|landing|web\s*site/i.test(txt)) autoTopic = "Сайт/лендинг";
     else if (/маркетинг|реклама|таргет|instagram|google\s*ads/i.test(txt)) autoTopic = "Маркетинг/реклама";
     else if (/бизнес[-\s]?процесс|автоматизац/i.test(txt)) autoTopic = "Бизнес-процессы/автоматизация";
-    // при желании добавляй другие подсказки
   }
 
   if (autoTopic) {
@@ -479,16 +485,13 @@ else if (booking.stage === "name" && userText.length > 1) {
   preReply = L.askPhone[lang] || L.askPhone.en;
   handled = true;
 }
-else if (booking.stage === "phone" && /[\d+\-\s()]{6,}/.test(userText)) {
+else if (booking.stage === "phone" && phoneOk(userText)) {
   booking.phone = userText;
-  booking.stage = "confirm";
-  await setBooking(chatId, booking);
-  preReply = (L.confirm(booking, lang)) || L.confirm(booking, "en");
-  handled = true;
-}
-  
-else if (booking.stage === "confirm" && yesRegex.test(userText)) {
+
+  // 1) Сообщаем пользователю
   preReply = L.booked[lang] || L.booked.en;
+
+  // 2) Отправляем админу
   const adminId = getAdminId();
   if (adminId) {
     const adminMsg =
@@ -503,10 +506,12 @@ else if (booking.stage === "confirm" && yesRegex.test(userText)) {
   } else {
     console.error("ADMIN_CHAT_ID is not set or empty");
   }
+
+  // 3) Сбрасываем слоты
   await clearBooking(chatId);
   handled = true;
 }
-    
+
 if (handled && preReply) {
   await pushHistory(chatId, "user", userText);
   await pushHistory(chatId, "assistant", preReply);
@@ -514,7 +519,7 @@ if (handled && preReply) {
   res.statusCode = 200;
   return res.end(JSON.stringify({ ok: true }));
 }
-
+    
     // ===== Обычный ИИ-ответ с историей, на нужном языке =====
     const history = await getHistory(chatId);
     const languageLine = lang === "ru"
@@ -526,7 +531,7 @@ if (handled && preReply) {
     const systemPrompt = baseSystemPrompt + "\n" + languageLine;
 
     // Приветствие по умолчанию, если юзер только начал
-    const maybeHi = history.length === 0 ? (L.hi[lang] || L.hi.en) : null;
+    const maybeHi = history.length === 0 ? (L.hi[lang] || L.hi.ru) : null;
 
     const messages = [
       { role: "system", content: systemPrompt },

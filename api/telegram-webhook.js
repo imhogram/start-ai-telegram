@@ -91,14 +91,20 @@ function confidentLangSwitch(text) {
 function isTimeLike(t) {
   if (!t) return false;
   const s = t.toLowerCase();
-  if (/\b(сегодня|завтра|послезавтра|вечер|утро|день|понед|вторн|сред|четв|пятн|субб|воскр)\b/.test(s)) return true;
-  if (/\b(бүгін|ертең|таңертең|түсте|кешке|дүйсенбі|сейсенбі|сәрсенбі|бейсенбі|жұма|сенбі|жексенбі)\b/.test(s)) return true;
-  if (/\b(tomorrow|today|evening|morning|afternoon|mon|tue|wed|thu|fri|sat|sun)\b/.test(s)) return true;
-  if (/\b\d{1,2}[:.]\d{2}\b/.test(s)) return true; // 11:00, 19.30
-  if (/\b\d{1,2}[/-]\d{1,2}\b/.test(s)) return true; // 29/08
+  // относительное время
+  if (/через\s+(пол|пол-)?часа?\b/.test(s)) return true;                // через полчаса / через час
+  if (/через\s+\d+\s*(час(а|ов)?|мин(ут)?)/.test(s)) return true;       // через 2 часа / через 30 мин
+  if (/(now|right now)/.test(s)) return true;
+  // рус/каз/анг ключевые слова
+  if (/\b(сейчас|вечер|утро|день|сегодня|завтра|послезавтра)\b/.test(s)) return true;
+  if (/\b(қазір|кешке|таңертең|түсте|бүгін|ертең)\b/.test(s)) return true;
+  if (/\b(today|tomorrow|evening|morning|afternoon)\b/.test(s)) return true;
+  // форматы времени/даты
+  if (/\b\d{1,2}[:.]\d{2}\b/.test(s)) return true;            // 11:00 / 19.30
+  if (/\b\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?\b/.test(s)) return true; // 29/08 / 29-08-2025
   return false;
-}
-function isNameLike(t) {
+  
+}function isNameLike(t) {
   if (!t) return false;
   if ((t.match(/\d/g) || []).length > 0) return false;
   const words = t.trim().split(/\s+/);
@@ -116,12 +122,21 @@ function pickPhone(t) {
   // берём самую длинную «похожую на номер» подстроку
   return m.sort((a,b)=> (b.match(/\d/g)||[]).length - (a.match(/\d/g)||[]).length)[0].trim();
 }
-function guessTopicFrom(text, lastAssistant = "") {
-  const src = (text + " " + lastAssistant).toLowerCase();
-  if (/ии|чат.?бот|ai.?bot|жасанды интеллект/.test(src)) return "ИИ-чатботы";
-  if (/сайт|лендинг|landing|web\s*site/.test(src)) return "Сайт/лендинг";
-  if (/маркетинг|реклама|таргет|instagram|google\s*ads/.test(src)) return "Маркетинг/реклама";
-  if (/бизнес[-\s]?процесс|автоматизац/.test(src)) return "Бизнес-процессы/автоматизация";
+
+function guessTopicFrom(userText, lastAssistant = "") {
+  const u = (userText || "").toLowerCase();
+  const a = (lastAssistant || "").toLowerCase();
+  const patterns = [
+    { re: /(фирстил|фирстиль|фирменн(ый|ого)?\s*стил|бренд(инг)?|логотип|логотипы|гайдлайн|brandbook|брендбук)/,  topic: "Фирменный стиль/брендинг" },
+    { re: /(сайт|лендинг|landing|web\s*site|веб[-\s]?сайт)/,                                             topic: "Сайт/лендинг" },
+    { re: /(ии|чат.?бот|ai.?bot|жасанды интеллект)/,                                                    topic: "ИИ-чатботы" },
+    { re: /(маркетинг|реклама|таргет|instagram|google\s*ads|smm)/,                                      topic: "Маркетинг/реклама" },
+    { re: /(бизнес[-\s]?процесс|автоматизац|crm)/,                                                      topic: "Бизнес-процессы/автоматизация" },
+  ];
+  // 1) пытаемся найти в сообщении пользователя
+  for (const p of patterns) if (p.re.test(u)) return p.topic;
+  // 2) если не нашли — смотрим подсказки из последнего ответа ассистента
+  for (const p of patterns) if (p.re.test(a)) return p.topic;
   return "Консультация";
 }
 
@@ -478,13 +493,17 @@ const bookTrigger = /консультац|запис|қабылда|кеңес|c
 // ONE-SHOT: если пользователь сразу прислал телефон (и текст), создаём лид без запуска слотов
 if (!booking.stage && hasPhone(userText)) {
   const phone  = pickPhone(userText);
-  // возьмём подсказку темы из последнего ответа ассистента или самого сообщения
   const hist   = await getHistory(chatId);
   const lastA  = hist.filter(h => h.role === "assistant").slice(-1)[0];
+
+  // тема — по тексту пользователя, при необходимости fallback к последнему ответу
   const topic  = guessTopicFrom(userText, lastA?.content || "");
+
+  // время: если распознали — берём из сообщения; иначе "-"
   const when   = isTimeLike(userText) ? userText : "-";
-  // имя попробуем выдрать как слово без цифр до первой запятой/«телефон»
-  const nameCandidate = userText.split(/[,|;]|тел(ефон)?/i)[0].trim();
+
+  // имя: до первой запятой / слова "тел"/"phone"; без цифр
+  let nameCandidate = userText.split(/[,;]|тел(ефон)?|phone/i)[0].trim();
   const name  = isNameLike(nameCandidate) ? nameCandidate : "-";
 
   // 1) сообщение пользователю
@@ -506,11 +525,11 @@ if (!booking.stage && hasPhone(userText)) {
     console.error("ADMIN_CHAT_ID is not set or empty");
   }
 
-  // чистим состояние на всякий
   await clearBooking(chatId);
   handled = true;
 }
-// обычный запуск слотов по ключевым словам
+  
+    // обычный запуск слотов по ключевым словам
 else if (!booking.stage && bookTrigger.test(userText)) {
   // ... (твой текущий код автоподхвата темы и перехода к when)  
   // Попробуем взять тему из последнего ответа ассистента

@@ -64,23 +64,47 @@ async function clearBooking(chatId) {
 // ==== Детект языка (ru/kz/en) с учётом "kz без диакритик" ====
 function detectLang(text) {
   if (!text) return "ru";
-
-  // 1) Явные казахские буквы
   const hasKazChars = /[әғқңөұүһі]/i.test(text);
-
-  // 2) "KZ без диакритик" — частые слова и конструкции
-  // Сюда добавил формы без спецбукв: саламатсыз(ба), салем, рахмет, жаксы, бар ма/барма, сендер/сиздер, ия/иа/ия, жок
   const hasKazHints = /(саламат|салем|сәлем|рахмет|жаксы|жақсы|бар\s*ма|барма|сендер|сиздер|сіздер|сиз|сіз|ия\b|иа\b|жок\b|жоқ\b|калай|қалай)/i.test(text);
-
-  // 3) Любая кириллица
   const hasCyr = /[А-Яа-яЁёІіЇїЪъЫыЭэЙй]/.test(text);
-
   if (hasKazChars || hasKazHints) return "kz";
   if (hasCyr) return "ru";
   return "en";
 }
 
-// >=11 цифр — считаем валидным телефоном
+// ==== "Уверенное" переключение языка (не реагируем на цифры/эмодзи) ====
+function confidentLangSwitch(text) {
+  if (!text || text.trim().length === 0) return null;
+  if (/русск|рос/iu.test(text)) return "ru";
+  if (/казак|қазақ|казах/iu.test(text)) return "kz";
+  if (/english|англ|english please|en\b/iu.test(text)) return "en";
+  const hasLatin = /[A-Za-z]/.test(text);
+  const hasCyr = /[А-Яа-яЁёІіЇїЪъЫыЭэЙй]/.test(text);
+  if (hasLatin && !hasCyr) return "en";
+  const hasKazChars = /[әғқңөұүһі]/i.test(text);
+  const hasKazHints = /(саламат|салем|рахмет|жаксы|бар\s*ма|сендер|сиздер|ия\b|жок\b|қалай)/i.test(text);
+  if (hasKazChars || hasKazHints) return "kz";
+  return null; // иначе не трогаем текущий язык
+}
+
+// ==== Валидаторы слотов ====
+function isTimeLike(t) {
+  if (!t) return false;
+  const s = t.toLowerCase();
+  if (/\b(сегодня|завтра|послезавтра|вечер|утро|день|понед|вторн|сред|четв|пятн|субб|воскр)\b/.test(s)) return true;
+  if (/\b(бүгін|ертең|таңертең|түсте|кешке|дүйсенбі|сейсенбі|сәрсенбі|бейсенбі|жұма|сенбі|жексенбі)\b/.test(s)) return true;
+  if (/\b(tomorrow|today|evening|morning|afternoon|mon|tue|wed|thu|fri|sat|sun)\b/.test(s)) return true;
+  if (/\b\d{1,2}[:.]\d{2}\b/.test(s)) return true; // 11:00, 19.30
+  if (/\b\d{1,2}[/-]\d{1,2}\b/.test(s)) return true; // 29/08
+  return false;
+}
+function isNameLike(t) {
+  if (!t) return false;
+  if ((t.match(/\d/g) || []).length > 0) return false;
+  const words = t.trim().split(/\s+/);
+  return /[A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі]/.test(t) && words.length <= 3 && t.length <= 40;
+}
+// >=11 цифр — считаем валидным телефоном (оставляем твой критерий)
 function phoneOk(t) {
   return ((t.match(/\d/g) || []).length) >= 11;
 }
@@ -385,8 +409,8 @@ export default async function handler(req, res) {
         res.statusCode = 200;
         return res.end(JSON.stringify({ ok: true }));
       } else {
-        const current = (await redis.get(LANG_KEY(chatId))) || detectLang(userText);
-        await sendTG(chatId, L.unknownLang[current] || L.unknownLang.en);
+        const current = (await redis.get(LANG_KEY(chatId))) || detectLang(userText) || "ru";
+        await sendTG(chatId, L.unknownLang[current] || L.unknownLang.ru);
         res.statusCode = 200;
         return res.end(JSON.stringify({ ok: true }));
       }
@@ -396,17 +420,19 @@ export default async function handler(req, res) {
     if (userText === "/reset") {
       await redis.del(`hist:${chatId}`);
       await redis.del(`book:${chatId}`);
-      const current = (await redis.get(LANG_KEY(chatId))) || detectLang(userText);
-      await sendTG(chatId, L.resetDone[current] || L.resetDone.en);
+      const current = (await redis.get(LANG_KEY(chatId))) || detectLang(userText) || "ru";
+      await sendTG(chatId, L.resetDone[current] || L.resetDone.ru);
       res.statusCode = 200;
       return res.end(JSON.stringify({ ok: true }));
     }
 
-    // 3) Вычисляем язык (приоритет: сохранённый → авто-детект текущего текста)
-    let lang = (await redis.get(LANG_KEY(chatId))) || detectLang(userText) || "ru";
-    if (!lang) lang = "ru";
-    // Обновим TTL языка на месяц
-    await redis.set(LANG_KEY(chatId), lang, { ex: 60 * 60 * 24 * 30 });
+    // 3) Вычисляем язык: приоритет сохранённого; переключаемся только при уверенном сигнале
+    const stored = await redis.get(LANG_KEY(chatId));
+    const guess = confidentLangSwitch(userText);
+    let lang = (stored || guess || "ru");
+    if (!stored || (guess && guess !== stored)) {
+      await redis.set(LANG_KEY(chatId), lang, { ex: 60 * 60 * 24 * 30 });
+    }
 
     if (userText === "/whoami") {
       await sendTG(chatId, `chat.id: ${chatId}`);
@@ -414,112 +440,126 @@ export default async function handler(req, res) {
       return res.end(JSON.stringify({ ok: true }));
     }
 
-if (userText === "/pingadmin") {
-  const adminId = getAdminId();
-  if (!adminId) {
-    await sendTG(chatId, "ADMIN_CHAT_ID не задан");
-  } else {
-    await sendTG(adminId, "✅ Тест: сообщение администратору из бота");
-    await sendTG(chatId, `Отправил тест админу: ${adminId}`);
-  }
-  res.statusCode = 200;
-  return res.end(JSON.stringify({ ok: true }));
-}
-    
-// ===== Слоты записи =====
-const booking = await getBooking(chatId);
-let handled = false;
-let preReply = null;
+    if (userText === "/pingadmin") {
+      const adminId = getAdminId();
+      if (!adminId) {
+        await sendTG(chatId, "ADMIN_CHAT_ID не задан");
+      } else {
+        await sendTG(adminId, "✅ Тест: сообщение администратору из бота");
+        await sendTG(chatId, `Отправил тест админу: ${adminId}`);
+      }
+      res.statusCode = 200;
+      return res.end(JSON.stringify({ ok: true }));
+    }
 
-const bookTrigger = /консультац|запис|қабылда|кеңес|consult|booking/i;
+    // ===== Слоты записи =====
+    const booking = await getBooking(chatId);
+    let handled = false;
+    let preReply = null;
 
-// хелпер для телефона: >=11 цифр
-function phoneOk(t) {
-  return ((t.match(/\d/g) || []).length) >= 11;
-}
+    const bookTrigger = /консультац|запис|қабылда|кеңес|consult|booking/i;
 
-if (!booking.stage && bookTrigger.test(userText)) {
-  // Попробуем взять тему из последнего ответа ассистента
-  const hist = await getHistory(chatId);
-  const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
-  let autoTopic = null;
+    if (!booking.stage && bookTrigger.test(userText)) {
+      // Попробуем взять тему из последнего ответа ассистента
+      const hist = await getHistory(chatId);
+      const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
+      let autoTopic = null;
 
-  if (lastA && typeof lastA.content === "string") {
-    const txt = lastA.content.toLowerCase();
-    if (/ии|чат.?бот|ai.?bot|жасанды интеллект/i.test(txt)) autoTopic = "ИИ-чатботы";
-    else if (/сайт|лендинг|landing|web\s*site/i.test(txt)) autoTopic = "Сайт/лендинг";
-    else if (/маркетинг|реклама|таргет|instagram|google\s*ads/i.test(txt)) autoTopic = "Маркетинг/реклама";
-    else if (/бизнес[-\s]?процесс|автоматизац/i.test(txt)) autoTopic = "Бизнес-процессы/автоматизация";
-  }
+      if (lastA && typeof lastA.content === "string") {
+        const txt = lastA.content.toLowerCase();
+        if (/ии|чат.?бот|ai.?bot|жасанды интеллект/i.test(txt)) autoTopic = "ИИ-чатботы";
+        else if (/сайт|лендинг|landing|web\s*site/i.test(txt)) autoTopic = "Сайт/лендинг";
+        else if (/маркетинг|реклама|таргет|instagram|google\s*ads/i.test(txt)) autoTopic = "Маркетинг/реклама";
+        else if (/бизнес[-\s]?процесс|автоматизац/i.test(txt)) autoTopic = "Бизнес-процессы/автоматизация";
+      }
 
-  if (autoTopic) {
-    booking.topic = autoTopic;
-    booking.stage = "when";
-    await setBooking(chatId, booking);
-    preReply = L.askWhen[lang] || L.askWhen.en;
-  } else {
-    booking.stage = "topic";
-    await setBooking(chatId, booking);
-    preReply = L.startBooking[lang] || L.startBooking.en;
-  }
-  handled = true;
-}
-else if (booking.stage === "topic" && userText.length > 1) {
-  booking.topic = userText;
-  booking.stage = "when";
-  await setBooking(chatId, booking);
-  preReply = L.askWhen[lang] || L.askWhen.en;
-  handled = true;
-}
-else if (booking.stage === "when" && userText.length > 1) {
-  booking.when = userText;
-  booking.stage = "name";
-  await setBooking(chatId, booking);
-  preReply = L.askName[lang] || L.askName.en;
-  handled = true;
-}
-else if (booking.stage === "name" && userText.length > 1) {
-  booking.name = userText;
-  booking.stage = "phone";
-  await setBooking(chatId, booking);
-  preReply = L.askPhone[lang] || L.askPhone.en;
-  handled = true;
-}
-else if (booking.stage === "phone" && phoneOk(userText)) {
-  booking.phone = userText;
+      if (autoTopic) {
+        booking.topic = autoTopic;
+        booking.stage = "when";
+        await setBooking(chatId, booking);
+        preReply = L.askWhen[lang] || L.askWhen.en;
+      } else {
+        booking.stage = "topic";
+        await setBooking(chatId, booking);
+        preReply = L.startBooking[lang] || L.startBooking.en;
+      }
+      handled = true;
+    }
+    else if (booking.stage === "topic" && userText.length > 1) {
+      booking.topic = userText;
+      booking.stage = "when";
+      await setBooking(chatId, booking);
+      preReply = L.askWhen[lang] || L.askWhen.en;
+      handled = true;
+    }
+    else if (booking.stage === "when") {
+      if (isTimeLike(userText)) {
+        booking.when = userText;
+        booking.stage = "name";
+        await setBooking(chatId, booking);
+        preReply = L.askName[lang] || L.askName.en;
+      } else {
+        preReply = L.askWhen[lang] || L.askWhen.en; // остаёмся на этом шаге
+      }
+      handled = true;
+    }
+    else if (booking.stage === "name") {
+      if (isNameLike(userText)) {
+        booking.name = userText;
+        booking.stage = "phone";
+        await setBooking(chatId, booking);
+        preReply = L.askPhone[lang] || L.askPhone.en;
+      } else {
+        preReply = (lang === "kz")
+          ? "Есім тек мәтін түрінде керек (цифрларсыз). Қалай жазылады?"
+          : (lang === "en")
+            ? "Please send just your name (letters only)."
+            : "Пожалуйста, укажите только имя (без цифр). Как к вам обращаться?";
+      }
+      handled = true;
+    }
+    else if (booking.stage === "phone") {
+      if (phoneOk(userText)) {
+        booking.phone = userText;
 
-  // 1) Сообщаем пользователю
-  preReply = L.booked[lang] || L.booked.en;
+        // 1) Сообщаем пользователю
+        preReply = L.booked[lang] || L.booked.en;
 
-  // 2) Отправляем админу
-  const adminId = getAdminId();
-  if (adminId) {
-    const adminMsg =
-      `🆕 Новая заявка чатбота:\n` +
-      `Тема: ${booking.topic}\n` +
-      `Время: ${booking.when}\n` +
-      `Имя: ${booking.name}\n` +
-      `Телефон: ${booking.phone}\n` +
-      `Источник: tg chat_id ${chatId}`;
-    const r = await sendTG(adminId, adminMsg);
-    if (!r.ok) console.error("Failed to send lead to admin:", adminId);
-  } else {
-    console.error("ADMIN_CHAT_ID is not set or empty");
-  }
+        // 2) Отправляем админу
+        const adminId = getAdminId();
+        if (adminId) {
+          const adminMsg =
+            `🆕 Новая заявка чатбота:\n` +
+            `Тема: ${booking.topic || "-"}\n` +
+            `Время: ${booking.when || "-"}\n` +
+            `Имя: ${booking.name || "-"}\n` +
+            `Телефон: ${booking.phone || "-"}\n` +
+            `Источник: tg chat_id ${chatId}`;
+          const r = await sendTG(adminId, adminMsg);
+          if (!r.ok) console.error("Failed to send lead to admin:", adminId);
+        } else {
+          console.error("ADMIN_CHAT_ID is not set or empty");
+        }
 
-  // 3) Сбрасываем слоты
-  await clearBooking(chatId);
-  handled = true;
-}
+        await clearBooking(chatId);
+      } else {
+        preReply = (lang === "kz")
+          ? "Телефон нөмірін жіберіңіз (кемінде 11 цифр)."
+          : (lang === "en")
+            ? "Please send a phone number (at least 11 digits)."
+            : "Пожалуйста, отправьте номер телефона (не менее 11 цифр).";
+      }
+      handled = true;
+    }
 
-if (handled && preReply) {
-  await pushHistory(chatId, "user", userText);
-  await pushHistory(chatId, "assistant", preReply);
-  await sendTG(chatId, preReply);
-  res.statusCode = 200;
-  return res.end(JSON.stringify({ ok: true }));
-}
-    
+    if (handled && preReply) {
+      await pushHistory(chatId, "user", userText);
+      await pushHistory(chatId, "assistant", preReply);
+      await sendTG(chatId, preReply);
+      res.statusCode = 200;
+      return res.end(JSON.stringify({ ok: true }));
+    }
+
     // ===== Обычный ИИ-ответ с историей, на нужном языке =====
     const history = await getHistory(chatId);
     const languageLine = lang === "ru"
@@ -530,7 +570,6 @@ if (handled && preReply) {
 
     const systemPrompt = baseSystemPrompt + "\n" + languageLine;
 
-    // Приветствие по умолчанию, если юзер только начал
     const maybeHi = history.length === 0 ? (L.hi[lang] || L.hi.ru) : null;
 
     const messages = [
@@ -549,7 +588,6 @@ if (handled && preReply) {
       completion.choices?.[0]?.message?.content?.slice(0, 3500) ||
       (maybeHi || "Готово. Какой следующий вопрос?");
 
-    // Если это первый ответ — вставим наше приветствие, если модель не сказала ничего
     if (history.length === 0 && (!reply || reply.trim().length < 3)) {
       reply = maybeHi;
     }

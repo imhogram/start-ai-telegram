@@ -403,6 +403,12 @@ export default async function handler(req, res) {
     // Обновим TTL языка на месяц
     await redis.set(LANG_KEY(chatId), lang, { ex: 60 * 60 * 24 * 30 });
 
+    if (userText === "/whoami") {
+      await sendTG(chatId, `chat.id: ${chatId}`);
+      res.statusCode = 200;
+      return res.end(JSON.stringify({ ok: true }));
+    }
+    
 // ===== Слоты записи =====
 const booking = await getBooking(chatId);
 let handled = false;
@@ -539,9 +545,17 @@ if (handled && preReply) {
 
 // ==== Отправка сообщения в Telegram ====
 async function sendTG(chatId, text) {
-  await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text }),
-  });
+  const resp = await fetch(
+    `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text }),
+    }
+  );
+  if (!resp.ok) {
+    const body = await resp.text();
+    console.error("sendTG error", resp.status, body, "chat_id=", chatId);
+  }
+  return resp;
 }

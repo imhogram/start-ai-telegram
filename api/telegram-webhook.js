@@ -401,77 +401,86 @@ export default async function handler(req, res) {
     // Обновим TTL языка на месяц
     await redis.set(LANG_KEY(chatId), lang, { ex: 60 * 60 * 24 * 30 });
 
-    // ===== Слоты записи =====
-    const booking = await getBooking(chatId);
-    let handled = false;
-    let preReply = null;
+// ===== Слоты записи =====
+const booking = await getBooking(chatId);
+let handled = false;
+let preReply = null;
 
-    const yesRegex = lang === "ru" ? /^да\b/i : lang === "kz" ? /^(иә|иа|ия)\b/i : /^yes\b/i;
-    const bookTrigger = /консультац|запис|қабылда|кеңес|consult|booking/i;
+const yesRegex =
+  lang === "ru" ? /^да\b/i :
+  lang === "kz" ? /^(иә|иа|ия)\b/i :
+  /^yes\b/i;
 
-    if (!booking.stage && bookTrigger.test(userText)) {
-      // Попробуем взять тему из последнего ответа ассистента
-      const hist = await getHistory(chatId);
-      const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
-      let autoTopic = null;
+const bookTrigger = /консультац|запис|қабылда|кеңес|consult|booking/i;
 
-      if (lastA) {
-        const txt = lastA.content.toLowerCase();
-        if (/ии|чат.?бот/i.test(txt)) autoTopic = "ИИ-чатботы";
-        else if (/сайт|лендинг|landing/i.test(txt)) autoTopic = "Сайт/лендинг";
-        else if (/маркетинг|реклама|таргет/i.test(txt)) autoTopic = "Маркетинг/реклама";
-      }
-      
-      if (autoTopic) {
-        booking.topic = autoTopic;
-        booking.stage = "when";
-        await setBooking(chatId, booking);
-        preReply = L.askWhen[lang] || L.askWhen.en;
-      } else {
-        booking.stage = "topic";
-        await setBooking(chatId, booking);
-        preReply = L.startBooking[lang] || L.startBooking.en;
-      }
-      handled = true;
-    }
-    
-    } else if (booking.stage === "topic" && userText.length > 1) {
-      booking.topic = userText;
-      booking.stage = "when";
-      await setBooking(chatId, booking);
-      preReply = L.askWhen[lang] || L.askWhen.en;
-      handled = true;
-    } else if (booking.stage === "when" && userText.length > 1) {
-      booking.when = userText;
-      booking.stage = "name";
-      await setBooking(chatId, booking);
-      preReply = L.askName[lang] || L.askName.en;
-      handled = true;
-    } else if (booking.stage === "name" && userText.length > 1) {
-      booking.name = userText;
-      booking.stage = "phone";
-      await setBooking(chatId, booking);
-      preReply = L.askPhone[lang] || L.askPhone.en;
-      handled = true;
-    } else if (booking.stage === "phone" && /[\d+\-\s()]{6,}/.test(userText)) {
-      booking.phone = userText;
-      booking.stage = "confirm";
-      await setBooking(chatId, booking);
-      preReply = (L.confirm(booking, lang)) || L.confirm(booking, "en");
-      handled = true;
-    } else if (booking.stage === "confirm" && yesRegex.test(userText)) {
-      preReply = L.booked[lang] || L.booked.en;
-      await clearBooking(chatId);
-      handled = true;
-    }
+if (!booking.stage && bookTrigger.test(userText)) {
+  // Попробуем взять тему из последнего ответа ассистента
+  const hist = await getHistory(chatId);
+  const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
+  let autoTopic = null;
 
-    if (handled && preReply) {
-      await pushHistory(chatId, "user", userText);
-      await pushHistory(chatId, "assistant", preReply);
-      await sendTG(chatId, preReply);
-      res.statusCode = 200;
-      return res.end(JSON.stringify({ ok: true }));
-    }
+  if (lastA && typeof lastA.content === "string") {
+    const txt = lastA.content.toLowerCase();
+    if (/ии|чат.?бот|ai.?bot|жасанды интеллект/i.test(txt)) autoTopic = "ИИ-чатботы";
+    else if (/сайт|лендинг|landing|web\s*site/i.test(txt)) autoTopic = "Сайт/лендинг";
+    else if (/маркетинг|реклама|таргет|instagram|google\s*ads/i.test(txt)) autoTopic = "Маркетинг/реклама";
+    else if (/бизнес[-\s]?процесс|автоматизац/i.test(txt)) autoTopic = "Бизнес-процессы/автоматизация";
+    // при желании добавляй другие подсказки
+  }
+
+  if (autoTopic) {
+    booking.topic = autoTopic;
+    booking.stage = "when";
+    await setBooking(chatId, booking);
+    preReply = L.askWhen[lang] || L.askWhen.en;
+  } else {
+    booking.stage = "topic";
+    await setBooking(chatId, booking);
+    preReply = L.startBooking[lang] || L.startBooking.en;
+  }
+  handled = true;
+}
+else if (booking.stage === "topic" && userText.length > 1) {
+  booking.topic = userText;
+  booking.stage = "when";
+  await setBooking(chatId, booking);
+  preReply = L.askWhen[lang] || L.askWhen.en;
+  handled = true;
+}
+else if (booking.stage === "when" && userText.length > 1) {
+  booking.when = userText;
+  booking.stage = "name";
+  await setBooking(chatId, booking);
+  preReply = L.askName[lang] || L.askName.en;
+  handled = true;
+}
+else if (booking.stage === "name" && userText.length > 1) {
+  booking.name = userText;
+  booking.stage = "phone";
+  await setBooking(chatId, booking);
+  preReply = L.askPhone[lang] || L.askPhone.en;
+  handled = true;
+}
+else if (booking.stage === "phone" && /[\d+\-\s()]{6,}/.test(userText)) {
+  booking.phone = userText;
+  booking.stage = "confirm";
+  await setBooking(chatId, booking);
+  preReply = (L.confirm(booking, lang)) || L.confirm(booking, "en");
+  handled = true;
+}
+else if (booking.stage === "confirm" && yesRegex.test(userText)) {
+  preReply = L.booked[lang] || L.booked.en;
+  await clearBooking(chatId);
+  handled = true;
+}
+
+if (handled && preReply) {
+  await pushHistory(chatId, "user", userText);
+  await pushHistory(chatId, "assistant", preReply);
+  await sendTG(chatId, preReply);
+  res.statusCode = 200;
+  return res.end(JSON.stringify({ ok: true }));
+}
 
     // ===== Обычный ИИ-ответ с историей, на нужном языке =====
     const history = await getHistory(chatId);

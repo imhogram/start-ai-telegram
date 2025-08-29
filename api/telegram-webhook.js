@@ -381,7 +381,7 @@ export default async function handler(req, res) {
         return res.end(JSON.stringify({ ok: true }));
       } else {
         const current = (await redis.get(LANG_KEY(chatId))) || detectLang(userText);
-        await sendTG(chatId, L.unknownLang[current] || L.unknownLang.ru);
+        await sendTG(chatId, L.unknownLang[current] || L.unknownLang.en);
         res.statusCode = 200;
         return res.end(JSON.stringify({ ok: true }));
       }
@@ -408,17 +408,27 @@ export default async function handler(req, res) {
       res.statusCode = 200;
       return res.end(JSON.stringify({ ok: true }));
     }
+
+if (userText === "/pingadmin") {
+  const adminId = getAdminId();
+  if (!adminId) {
+    await sendTG(chatId, "ADMIN_CHAT_ID не задан");
+  } else {
+    await sendTG(adminId, "✅ Тест: сообщение администратору из бота");
+    await sendTG(chatId, `Отправил тест админу: ${adminId}`);
+  }
+  res.statusCode = 200;
+  return res.end(JSON.stringify({ ok: true }));
+}
     
 // ===== Слоты записи =====
 const booking = await getBooking(chatId);
 let handled = false;
 let preReply = null;
 
-const yesRegex =
-  lang === "ru" ? /^да\b/i :
-  lang === "kz" ? /^(иә|иа|ия)\b/i :
-  /^yes\b/i;
-
+// принимай подтверждение на любом языке + с запятой/точкой/пробелом
+const yesRegex = /^(да|давай|ок|иә|иа|ия|yes|ok)\b/i;
+    
 const bookTrigger = /консультац|запис|қабылда|кеңес|consult|booking/i;
 
 if (!booking.stage && bookTrigger.test(userText)) {
@@ -479,8 +489,8 @@ else if (booking.stage === "phone" && /[\d+\-\s()]{6,}/.test(userText)) {
   
 else if (booking.stage === "confirm" && yesRegex.test(userText)) {
   preReply = L.booked[lang] || L.booked.en;
-  // Отправка админу (если настроен)
-  if (process.env.ADMIN_CHAT_ID) {
+  const adminId = getAdminId();
+  if (adminId) {
     const adminMsg =
       `🆕 Новая заявка чатбота:\n` +
       `Тема: ${booking.topic}\n` +
@@ -488,9 +498,10 @@ else if (booking.stage === "confirm" && yesRegex.test(userText)) {
       `Имя: ${booking.name}\n` +
       `Телефон: ${booking.phone}\n` +
       `Источник: tg chat_id ${chatId}`;
-    await sendTG(process.env.ADMIN_CHAT_ID, adminMsg);
+    const r = await sendTG(adminId, adminMsg);
+    if (!r.ok) console.error("Failed to send lead to admin:", adminId);
   } else {
-    console.error("ADMIN_CHAT_ID is not set");
+    console.error("ADMIN_CHAT_ID is not set or empty");
   }
   await clearBooking(chatId);
   handled = true;
@@ -552,6 +563,11 @@ if (handled && preReply) {
 }
 
 // ==== Отправка сообщения в Telegram ====
+function getAdminId() {
+  const raw = (process.env.ADMIN_CHAT_ID || "").trim().replace(/^['"]|['"]$/g, "");
+  return raw;
+}
+
 async function sendTG(chatId, text) {
   const resp = await fetch(
     `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,

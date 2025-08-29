@@ -410,10 +410,31 @@ export default async function handler(req, res) {
     const bookTrigger = /консультац|запис|қабылда|кеңес|consult|booking/i;
 
     if (!booking.stage && bookTrigger.test(userText)) {
-      booking.stage = "topic";
-      await setBooking(chatId, booking);
-      preReply = L.startBooking[lang] || L.startBooking.en;
+      // Попробуем взять тему из последнего ответа ассистента
+      const hist = await getHistory(chatId);
+      const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
+      let autoTopic = null;
+
+      if (lastA) {
+        const txt = lastA.content.toLowerCase();
+        if (/ии|чат.?бот/i.test(txt)) autoTopic = "ИИ-чатботы";
+        else if (/сайт|лендинг|landing/i.test(txt)) autoTopic = "Сайт/лендинг";
+        else if (/маркетинг|реклама|таргет/i.test(txt)) autoTopic = "Маркетинг/реклама";
+      }
+      
+      if (autoTopic) {
+        booking.topic = autoTopic;
+        booking.stage = "when";
+        await setBooking(chatId, booking);
+        preReply = L.askWhen[lang] || L.askWhen.en;
+      } else {
+        booking.stage = "topic";
+        await setBooking(chatId, booking);
+        preReply = L.startBooking[lang] || L.startBooking.en;
+      }
       handled = true;
+    }
+    
     } else if (booking.stage === "topic" && userText.length > 1) {
       booking.topic = userText;
       booking.stage = "when";

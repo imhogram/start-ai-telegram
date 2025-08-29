@@ -61,11 +61,21 @@ async function clearBooking(chatId) {
   await redis.del(`book:${chatId}`);
 }
 
-// ==== Детект языка (ru/kz/en) ====
+// ==== Детект языка (ru/kz/en) с учётом "kz без диакритик" ====
 function detectLang(text) {
-  const hasKaz = /[әғқңөұүһі]/i.test(text);
-  const hasCyr = /[ЁёА-Яа-яІіЇїЪъЫыЭэЙй]/.test(text) || /[А-Яа-я]/.test(text);
-  if (hasKaz) return "kz";
+  if (!text) return "ru";
+
+  // 1) Явные казахские буквы
+  const hasKazChars = /[әғқңөұүһі]/i.test(text);
+
+  // 2) "KZ без диакритик" — частые слова и конструкции
+  // Сюда добавил формы без спецбукв: саламатсыз(ба), салем, рахмет, жаксы, бар ма/барма, сендер/сиздер, ия/иа/ия, жок
+  const hasKazHints = /(саламат|салем|сәлем|рахмет|жаксы|жақсы|бар\s*ма|барма|сендер|сиздер|сіздер|сиз|сіз|ия\b|иа\b|жок\b|жоқ\b|калай|қалай)/i.test(text);
+
+  // 3) Любая кириллица
+  const hasCyr = /[А-Яа-яЁёІіЇїЪъЫыЭэЙй]/.test(text);
+
+  if (hasKazChars || hasKazHints) return "kz";
   if (hasCyr) return "ru";
   return "en";
 }

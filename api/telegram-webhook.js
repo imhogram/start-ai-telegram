@@ -247,19 +247,26 @@ function buildRecentUserBundle(history, currentUserText, n = 4) {
 
 function collectLeadFromRecent(history, currentUserText, lastAssistantText) {
   const bundle = buildRecentUserBundle(history, currentUserText, 4);
+  // phone
   const phoneMatch = bundle.match(/[\+\d][\d\-\s().]{5,}/g);
   if (!phoneMatch) return null;
-  const phone = phoneMatch.sort((a,b)=> (b.match(/\d/g)||[]).length - (a.match(/\d/g)||[]).length)[0].trim();
-
-  const topics = guessTopics(bundle, lastAssistantText || "");
-  const topic = topics.length ? topics.join(", ") : "Консультация";
+  const phone = phoneMatch
+    .sort((a,b)=> (b.match(/\d/g)||[]).length - (a.match(/\d/g)||[]).length)[0]
+    .trim();
+  // topics (возможны несколько)
+  const topicsArr = guessTopics(bundle, lastAssistantText || "");
+  const topic = topicsArr.length ? topicsArr.join(", ") : "Консультация";
+  // when
   const whenHit = extractWhen(bundle);
   const when = whenHit ? whenHit : "-";
-
-  const name = extractName(bundle) || "-";
-  const parts = bundle.split(/[•,;\n]+/).map(s => s.trim());
-  for (const c of parts) { if (isNameLike(c)) { name = c; break; } }
-
+  // name: пробуем аккуратно вытащить из фразы; если не нашли — ищем короткий токен без цифр
+  let name = extractName(bundle) || "-";
+  if (name === "-") {
+    const parts = bundle.split(/[•,;\n]+/).map(s => s.trim());
+    for (const c of parts) {
+      if (isNameLike(c)) { name = c; break; }
+    }
+  }
   return { topic, when, name, phone };
 }
 // ==== END TOPICS BLOCK ====

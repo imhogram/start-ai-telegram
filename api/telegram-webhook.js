@@ -216,7 +216,7 @@ const TOPIC_PATTERNS = [
   { re: /(логотип|logo|фирменн(ый|ого)?\s*стил|бренд(инг)?|фирстил|brand\s*identity)/i, topic: "Логотип и фирменный стиль" },
   { re: /(брендбук|brand.?book|гайдлайн|guideline)/i, topic: "Брендбук" },
   { re: /(сайт|веб.?сайт|web\s*site|site|лендинг|landing|интернет[-\s]?страниц)/i, topic: "Разработка сайта" },
-  { re: /(google.?ads|контекст|cpc|ppc|2гис|2gis|olx|таргет|реклам(а)?\s*в\s*интернет|кмс|gdn)/i, topic: "Реклама в интернете" },
+  { re: /(google.?ads|google|гугл(?:е)?|реклам[аы]\s*(?:в|на)\s*(?:google|гугл(?:е)?)|контекст(?:ная)?\s*реклам|контекст|кмс|контекстно-?медийн|gdn|cpc|ppc|2гис|2gis|olx|таргет)/i, topic: "Реклама в интернете"},
   { re: /(smm|инстаграм|instagram|ведение\s*профил|контент.?план|stories|reels|контент\s*маркетинг)/i, topic: "SMM ведение" },
   { re: /(отдел\s*продаж|sales\s*dept|скрипт|холодн(ые)?\s*звон|kpi|коммерческое\s*предложение)/i, topic: "Отдел продаж" },
   { re: /(crm|битрикс|bitrix|автоматизац|сквозн.*аналитик|chat.?bot|чат.?бот|ии.?бот|ai.?bot)/i, topic: "CRM, автоматизация, ИИ" },
@@ -640,19 +640,22 @@ export default async function handler(req, res) {
       }
     }
 
-    // === REUSE CONTACT: есть сохранённый контакт -> новая услуга без телефона
-    if (!handled) {
-      const contact = await getContact(chatId);
-      if (!booking.stage && contact?.phone && !hasPhone(userText)) {
-        const whenHit = extractWhen(userText) || extractWhen(buildRecentUserBundle(await getHistory(chatId), userText, 4));
+    // === REUSE CONTACT: есть сохранённый контакт -> новая услуга без телефона 
+    if (!handled) { 
+      const contact = await getContact(chatId); 
+      if (!booking.stage && contact?.phone && !hasPhone(userText)) { 
+        const hist  = await getHistory(chatId); 
+        const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
+
+        const bundle = buildRecentUserBundle(hist, userText, 4);
+        const whenHit = extractWhen(userText) || extractWhen(bundle);
         const when = whenHit ? _cleanTail(whenHit) : "-";
-        
-        const topicsArrMsg = guessTopics(userText, "");
+
+        const topicsArrMsg = guessTopics(userText, lastA?.content || "");
         const topicFromMsg = topicsArrMsg.length ? topicsArrMsg.join(", ") : "Консультация";
 
         if (topicFromMsg && topicFromMsg !== "Консультация") {
           preReply = L.booked[lang] || L.booked.en;
-
           const adminId = getAdminId();
           if (adminId) {
             const adminMsg =
@@ -673,7 +676,7 @@ export default async function handler(req, res) {
       }
     }
 
-    const bookTrigger = /консультац|запис|менеджер|поговор|қабылда|кеңес|consult|booking/i;
+    const bookTrigger = /консультац|запис|менеджер|оператор|поговор|қабылда|кеңес|consult|booking/i;
 
     // === ONE-SHOT: в одном сообщении есть телефон
     if (!handled && !booking.stage && hasPhone(userText)) {

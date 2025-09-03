@@ -114,12 +114,23 @@ function isTimeLike(t) { // оставим как мягкий флаг (уже 
   if (/\b\d{1,2}[\/-]\d{1,2}([\/-]\d{2,4})?\b/.test(s)) return true;
   return false;
 }
+
 function isNameLike(t) {
   if (!t) return false;
   if ((t.match(/\d/g) || []).length > 0) return false;
-  const words = t.trim().split(/\s+/);
-  return /[A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі]/.test(t) && words.length <= 3 && t.length <= 40;
+  const s = t.trim();
+  if (s.length < 2 || s.length > 40) return false;
+  // отсекаем приветствия/служебные слова
+  const STOP = /^(здравствуй|здравствуйте|привет|добрый\s*(день|вечер|утро)|салют|hello|hi|сәлем|салем|саламат|да|ок|окей|today|tomorrow|сегодня|завтра|днём|днем|вечером|утром)$/i;
+  if (STOP.test(s)) return false;
+  const words = s.split(/\s+/);
+  if (words.length > 3) return false;
+  if (!/[A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі]/.test(s)) return false;
+  // хотя бы одно слово начинается с заглавной — очень вероятно имя
+  if (!/(^|\s)[A-ZА-ЯӘҒҚҢӨҰҮҺІ]/.test(s)) return false;
+  return true;
 }
+
 // >=6 цифр — считаем валидным телефоном
 function phoneOk(t) { return ((t.match(/\d/g) || []).length) >= 6; }
 function hasPhone(t) { return ((t.match(/\d/g) || []).length) >= 6; }
@@ -127,6 +138,25 @@ function pickPhone(t) {
   const m = t.match(/[\+\d][\d\-\s().]{5,}/g);
   if (!m) return null;
   return m.sort((a,b)=> (b.match(/\d/g)||[]).length - (a.match(/\d/g)||[]).length)[0].trim();
+}
+
+// ==== достаем имя из комбинированной фразы ====
+function extractName(text) {
+  if (!text) return null;
+  // часть до телефона
+  const beforePhone = text.split(/[\+\d][\d\-\s().]{5,}/)[0] || text;
+  // бежим с конца по кускам, отделённым запятой/точкой с запятой/маркером •/переводом строки
+  const parts = beforePhone.split(/[•,;\n]+/).map(s => s.trim()).filter(Boolean);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    // уберём «я ...»
+    const cand = parts[i].replace(/^я\s+/i, "");
+    if (isNameLike(cand)) return cand;
+    // иногда имя — последнее слово в куске
+    const tokens = cand.split(/\s+/);
+    const last = tokens[tokens.length - 1];
+    if (isNameLike(last)) return last;
+  }
+  return null;
 }
 
 // ==== Мощное извлечение времени/дат/диапазонов ====
@@ -147,7 +177,7 @@ function extractWhen(t) {
   if (rel) return rel[0];
 
   // 4) "сегодня/завтра/..." + опц. "в HH(:MM)?" + часть дня
-  const dayKw = s.match(/\b(сейчас|сегодня|завтра|послезавтра|вечер(?:ом)?|утр(?:ом)?|дн(?:ём|ем)|сегодняшн(?:ий|им)|бүгін|ертең|қазір|кешке|таңертең|түсте)\b(?:\s*в\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?)?(?:\s*(утра|вечера|ночи|дня))?/);
+  const dayKw = s.match(/\b(сейчас|сегодня|завтра|послезавтра|вечер(?:ом)?|утр(?:ом)?|дн(?:ём|ем)|сегодняшн(?:ий|им)|бүгін|ертең|қазір|кешке|таңертең|түсте)\b(?:\s*в\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?)?(?:\s*(утра|вечера|ночи|дня|днём|днем))?/);
   if (dayKw) return dayKw[0];
 
   // 5) явное время: "в 17:20", "в 15 часов", "17:20", "3.45"
@@ -196,12 +226,18 @@ const TOPIC_PATTERNS = [
   { re: /(маркетолог|gtm|go.?to.?market|стратегия\s*продвижения)/i, topic: "Маркетинг/реклама" },
 ];
 
-function guessTopicFrom(userText, lastAssistant = "") {
+function guessTopics(userText, lastAssistant = "") {
   const u = (userText || "").toLowerCase();
   const a = (lastAssistant || "").toLowerCase();
-  for (const p of TOPIC_PATTERNS) if (p.re.test(u)) return p.topic;
-  for (const p of TOPIC_PATTERNS) if (p.re.test(a)) return p.topic;
-  return "Консультация";
+  const found = new Set();
+  for (const p of TOPIC_PATTERNS) if (p.re.test(u)) found.add(p.topic);
+  for (const p of TOPIC_PATTERNS) if (p.re.test(a)) found.add(p.topic);
+  return Array.from(found);
+}
+
+function guessTopicFrom(userText, lastAssistant = "") {
+  const arr = guessTopics(userText, lastAssistant);
+  return arr.length ? arr[0] : "Консультация";
 }
 
 function buildRecentUserBundle(history, currentUserText, n = 4) {
@@ -215,11 +251,12 @@ function collectLeadFromRecent(history, currentUserText, lastAssistantText) {
   if (!phoneMatch) return null;
   const phone = phoneMatch.sort((a,b)=> (b.match(/\d/g)||[]).length - (a.match(/\d/g)||[]).length)[0].trim();
 
-  const topic = guessTopicFrom(bundle, lastAssistantText || "");
+  const topics = guessTopics(bundle, lastAssistantText || "");
+  const topic = topics.length ? topics.join(", ") : "Консультация";
   const whenHit = extractWhen(bundle);
   const when = whenHit ? whenHit : "-";
 
-  let name = "-";
+  const name = extractName(bundle) || "-";
   const parts = bundle.split(/[•,;\n]+/).map(s => s.trim());
   for (const c of parts) { if (isNameLike(c)) { name = c; break; } }
 
@@ -597,7 +634,8 @@ export default async function handler(req, res) {
       if (!booking.stage && contact?.phone && !hasPhone(userText)) {
         const whenHit = extractWhen(userText);
         const when = whenHit ? whenHit : "-";
-        const topicFromMsg = guessTopicFrom(userText, ""); // только по тексту пользователя
+        const topicsArrMsg = guessTopics(userText, "");  // только по тексту пользователя
+        const topicFromMsg = topicsArrMsg.length ? topicsArrMsg.join(", ") : "Консультация";
         if (topicFromMsg && topicFromMsg !== "Консультация") {
           preReply = L.booked[lang] || L.booked.en;
 
@@ -629,12 +667,13 @@ export default async function handler(req, res) {
       const hist   = await getHistory(chatId);
       const lastA  = hist.filter(h => h.role === "assistant").slice(-1)[0];
 
-      const topic  = guessTopicFrom(userText, lastA?.content || "");
+      const topicsArr = guessTopics(userText, lastA?.content || "");
+      const topic = topicsArr.length ? topicsArr.join(", ") : "Консультация";
       const whenHit = extractWhen(userText);
       const when    = whenHit ? whenHit : "-";
 
-      let nameCandidate = userText.split(/[,;]|тел(ефон)?|phone/i)[0].trim();
-      const name  = isNameLike(nameCandidate) ? nameCandidate : "-";
+      let nameCandidate = extractName(userText);
+      const name = nameCandidate || "-";
 
       preReply = L.booked[lang] || L.booked.en;
 

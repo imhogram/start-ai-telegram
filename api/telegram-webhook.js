@@ -167,7 +167,7 @@ function extractName(text) {
 function extractWhen(t) {
   if (!t) return null;
 
-  // Нормализация пробелов и регистра
+  // Нормализация: невидимые пробелы, множественные пробелы, трим
   const s = t
     .toLowerCase()
     .replace(/[\u00A0\u202F\u2009]/g, " ") // NBSP, NNBSP, thin space -> обычный пробел
@@ -178,29 +178,27 @@ function extractWhen(t) {
   const range = s.match(/\b[сc]\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?\s*(?:до|-|—)\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?\b/);
   if (range) return _cleanTail(range[0]);
 
-  // 2) "до 6 ..."
+  // 2) "до 6 (вечера|утра|..)"
   const until = s.match(/\bдо\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?(?:\s*(утра|вечера|ночи|дня))?\b/);
   if (until) return _cleanTail(until[0]);
 
-  // 3) "через ..."
+  // 3) относительное
   const rel = s.match(/\bчерез\s+(?:пол(?:-)?часа?|час(?:а)?|\d+\s*(?:час(?:а|ов)?|мин(?:ут)?))\b/);
   if (rel) return _cleanTail(rel[0]);
 
-  // 4) сегодня/завтра/… [+ "в HH[:MM]"] [+ "утра/вечера"]
-  const dayKw = s.match(/\b(сейчас|сегодня|завтра|послезавтра|вечер(?:ом)?|утр(?:ом)?|дн(?:ём|ем)|сегодняшн(?:ий|им)|бүгін|ертең|қазір|кешке|таңертең|түсте)\b(?:\s*в\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?)?(?:\s*(утра|вечера|ночи|дня|днём|днем))?/);
+  // 4) ключевые слова дня + опционально "в HH[:MM]" + часть дня
+  const dayKw = s.match(/\b(сейчас|сегодня|завтра|послезавтра|бүгін|ертең|қазір|вечер(?:ом)?|утр(?:ом)?|дн(?:ём|ем))\b(?:\s*в\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?)?(?:\s*(утра|вечера|ночи|дня|днём|днем))?/);
   if (dayKw) return _cleanTail(dayKw[0]);
 
-  // 5) "сегодня/завтра утром/вечером/днём"
-  const dayPart = s.match(/\b(сегодня|завтра|послезавтра|бүгін|ертең)\s*(утром|вечером|днём|днем|ночью)?\b/);
+  // 5) «сегодня/завтра/послезавтра (утром/вечером/днём)» — даже без "в"
+  const dayPart = s.match(/\b(сегодня|завтра|послезавтра|бүгін|ертең)(?:\s*(утром|вечером|днём|днем|ночью))?\b/);
   if (dayPart) return _cleanTail(dayPart[0]);
 
   // 6) явное время
   const atHhmm = s.match(/\b(?:в\s*)?\d{1,2}([:.]\d{2})\b/);
   if (atHhmm) return _cleanTail(atHhmm[0]);
-
   const atHourWord = s.match(/\bв\s*\d{1,2}\s*(?:час(а|ов)?|ч)\b/);
   if (atHourWord) return _cleanTail(atHourWord[0]);
-
   const todayAtHour = s.match(/\b(сегодня|завтра|бүгін|ертең)\s*в\s*\d{1,2}\s*(?:час(а|ов)?|ч)?\b/);
   if (todayAtHour) return _cleanTail(todayAtHour[0]);
 
@@ -208,10 +206,9 @@ function extractWhen(t) {
   const dmy = s.match(/\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b/);
   if (dmy) return _cleanTail(dmy[0]);
 
-  // 8) EN-варианты
+  // 8) английские
   const enAt = s.match(/\b(?:today|tomorrow)\s*(?:at\s*)?\d{1,2}([:.]\d{2})?\s*(?:am|pm)?\b/);
   if (enAt) return _cleanTail(enAt[0]);
-
   const enTime = s.match(/\b(?:till|until)\s*\d{1,2}([:.]\d{2})?\s*(?:am|pm)?\b/);
   if (enTime) return _cleanTail(enTime[0]);
 
@@ -528,6 +525,7 @@ const baseSystemPrompt = `
 --- запуск франшизы и обработка первых обращений.
 = Конец списка услуг. =
 Правила:
+- Не используй в приветствии слова вроде "сегодня / today?".
 - Уважай контекст последних сообщений (история диалога).
 - Если пользователю нужна консультация специалиста — собери: {тема, время, имя, телефон}. После сбора подтверди и передай специалисту.
 - Если пользователь уже согласился на консультацию после того, как ты упомянул конкретную услугу (например, сайт или ИИ-боты или пр.), не уточняй тему повторно. Используй эту услугу как topic.
@@ -669,7 +667,7 @@ if (!handled) {
 
     // берём время из текущего текста или из «бандла»
     const bundle = buildRecentUserBundle(hist, userText, 4);
-    const whenHit = extractWhen(userText) || extractWhen(bundle);
+    const whenHit = extractWhen(userText) || extractWhen(bundle) || (lastA?.content ? extractWhen(lastA.content) : null);
     const when = whenHit ? _cleanTail(whenHit) : "-";
 
     // ТЕМЫ: объединяем найденное в текущем сообщении + в бандле + из последнего ответа ассистента
@@ -717,8 +715,8 @@ if (!handled && !booking.stage && hasPhone(userText)) {
   const topicsArr = Array.from(new Set([...fromMsg, ...fromBund]));
   const topic = topicsArr.length ? topicsArr.join(", ") : "Консультация";
 
-  // ВРЕМЯ: из этого сообщения или из бандла
-  let whenHit = extractWhen(userText) || extractWhen(bundle);
+  // ВРЕМЯ: из этого сообщения, или из бандла, или из последнего ответа ассистента
+  let whenHit = extractWhen(userText) || extractWhen(bundle) || (lastA?.content ? extractWhen(lastA.content) : null);
   const when = whenHit ? _cleanTail(whenHit) : "-";
 
   // ИМЯ
@@ -786,12 +784,12 @@ if (!handled && !booking.stage && hasPhone(userText)) {
       }
 
       if (whenHit) {
-        booking.when = whenHit.trim();
+        booking.when = _cleanTail(whenHit);
         booking.stage = "name";
         await setBooking(chatId, booking);
         preReply = L.askName[lang] || L.askName.en;
       } else {
-        preReply = L.askWhen[lang] || L.askWhen.en; // остаёмся на шаге
+        preReply = L.askWhen[lang] || L.askWhen.en;
       }
       handled = true;
     }
@@ -821,8 +819,8 @@ if (!handled && !booking.stage && hasPhone(userText)) {
         // 2.1 — время: если пусто/прочерк — вытягиваем из бандла
         if (!booking.when || booking.when === "-") {
           const bundle = buildRecentUserBundle(hist, userText, 4);
-          const aggWhen = extractWhen(bundle);
-          if (aggWhen) booking.when = aggWhen.trim();
+          const aggWhen = extractWhen(userText) || extractWhen(bundle) || (lastA?.content ? extractWhen(lastA.content) : null);
+          if (aggWhen) booking.when = _cleanTail(aggWhen);
         }
         // 2.2 — имя/тема: как и раньше
         if (!booking.name) {
@@ -914,7 +912,7 @@ if (!handled && !booking.stage && hasPhone(userText)) {
 
 // ==== Отправка сообщения в Telegram ====
 function getAdminId() {
-  const raw = (process.env.ADMIN_CHAT_ID || "").trim().replace(/^[\'"]|[\'"]$/g, "");
+  const raw = (process.env.ADMIN_CHAT_ID || "").replace(/^[\'"]|[\'"]$/g, "");
   return raw;
 }
 

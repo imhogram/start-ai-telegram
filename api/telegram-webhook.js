@@ -682,24 +682,21 @@ export default async function handler(req, res) {
       const phone  = pickPhone(userText);
       const hist   = await getHistory(chatId);
       const lastA  = hist.filter(h => h.role === "assistant").slice(-1)[0];
-
+      // все темы
       const topicsArr = guessTopics(userText, lastA?.content || "");
       const topic = topicsArr.length ? topicsArr.join(", ") : "Консультация";
-      
+      // время: из этого сообщения или из недавнего «бандла»
       let whenHit = extractWhen(userText);
       if (!whenHit) {
-        const hist = await getHistory(chatId);
         const bundle = buildRecentUserBundle(hist, userText, 4);
         whenHit = extractWhen(bundle);
       }
-      const whenHit = extractWhen(userText) || extractWhen(buildRecentUserBundle(await getHistory(chatId), userText, 4));
       const when = whenHit ? whenHit : "-";
-      
-      let nameCandidate = extractName(userText);
-      const name = nameCandidate || "-";
-
-      preReply = L.booked[lang] || L.booked.en;
-
+      // имя
+      const name = extractName(userText) || "-";
+      // ответ пользователю (на текущем языке)
+      preReply = L.booked[lang] || L.booked.ru;
+      // лид админу
       const adminId = getAdminId();
       if (adminId) {
         const adminMsg =
@@ -714,7 +711,6 @@ export default async function handler(req, res) {
       } else {
         console.error("ADMIN_CHAT_ID is not set or empty");
       }
-
       await setContact(chatId, { name, phone });
       await clearBooking(chatId);
       handled = true;

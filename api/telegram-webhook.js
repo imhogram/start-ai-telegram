@@ -254,7 +254,7 @@ function collectLeadFromRecent(history, currentUserText, lastAssistantText) {
     .trim();
 
   // topics
-  const topics = guessTopics(bundle, lastAssistantText || "");
+  const topics = guessTopics(bundle, "");
   const topic  = topics.length ? topics.join(", ") : "Консультация";
 
   // when
@@ -645,7 +645,7 @@ export default async function handler(req, res) {
       const contact = await getContact(chatId);
       if (!booking.stage && contact?.phone && !hasPhone(userText)) {
         const whenHit = extractWhen(userText) || extractWhen(buildRecentUserBundle(await getHistory(chatId), userText, 4));
-        const when = whenHit ? whenHit : "-";
+        const when = whenHit ? _cleanTail(whenHit) : "-";
         
         const topicsArrMsg = guessTopics(userText, "");
         const topicFromMsg = topicsArrMsg.length ? topicsArrMsg.join(", ") : "Консультация";
@@ -681,7 +681,7 @@ export default async function handler(req, res) {
       const hist   = await getHistory(chatId);
       const lastA  = hist.filter(h => h.role === "assistant").slice(-1)[0];
       // все темы
-      const topicsArr = guessTopics(userText, lastA?.content || "");
+      const topicsArr = guessTopics(userText, "");
       const topic = topicsArr.length ? topicsArr.join(", ") : "Консультация";
       // время: из этого сообщения или из недавнего «бандла»
       let whenHit = extractWhen(userText);
@@ -689,7 +689,7 @@ export default async function handler(req, res) {
         const bundle = buildRecentUserBundle(hist, userText, 4);
         whenHit = extractWhen(bundle);
       }
-      const when = whenHit ? whenHit : "-";
+      const when = whenHit ? _cleanTail(whenHit) : "-";
       // имя
       const name = extractName(userText) || "-";
       // ответ пользователю (на текущем языке)

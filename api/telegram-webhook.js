@@ -162,42 +162,46 @@ function extractName(text) {
 // ==== Мощное извлечение времени/дат/диапазонов ====
 function extractWhen(t) {
   if (!t) return null;
-  const s = t.toLowerCase().replace(/\s+/g, " ").trim();
+  // нормализуем пробелы и убираем лишние запятые перед "в"
+  const s = t.toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[,;\-–—]\s*в\s+/g, " в ")
+    .trim();
 
-  // 1) диапазоны: "с 14 до 16", "с 14:00 до 15:30", "с 2 до 3 часов", "с 10ч до 12ч"
-  const range = s.match(/\b[сc]\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?\s*(?:до|-|—)\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?\b/);
+  // 1) диапазоны: "с 14 до 16", "с 14:00 до 15:30", "с 2 до 3 часов"
+  const range = s.match(/\b[сc]\s*\d{1,2}(?:[:.]\d{2})?\s*(?:час(?:а|ов)?|ч)?\s*(?:до|-|—)\s*\d{1,2}(?:[:.]\d{2})?\s*(?:час(?:а|ов)?|ч)?\b/);
   if (range) return range[0];
 
-  // 2) "до 6 вечера/утра/ночи/дня" (deadlines)
-  const until = s.match(/\bдо\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?(?:\s*(утра|вечера|ночи|дня))?\b/);
+  // 2) дедлайн: "до 6 вечера/утра/…"
+  const until = s.match(/\bдо\s*\d{1,2}(?:[:.]\d{2})?\s*(?:час(?:а|ов)?|ч)?(?:\s*(утра|вечера|ночи|дня))?\b/);
   if (until) return until[0];
 
-  // 3) относительное время: "через час/полчаса/30 мин/2 часа"
+  // 3) относительное: "через час/полчаса/30 мин/2 часа"
   const rel = s.match(/\bчерез\s+(?:пол(?:-)?часа?|час(?:а)?|\d+\s*(?:час(?:а|ов)?|мин(?:ут)?))\b/);
   if (rel) return rel[0];
 
-  // 4) "сегодня/завтра/..." + опц. "в HH(:MM)?" + часть дня
-  const dayKw = s.match(/\b(сейчас|сегодня|завтра|послезавтра|вечер(?:ом)?|утр(?:ом)?|дн(?:ём|ем)|сегодняшн(?:ий|им)|бүгін|ертең|қазір|кешке|таңертең|түсте)\b(?:\s*в\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?)?(?:\s*(утра|вечера|ночи|дня|днём|днем))?/);
+  // 4) «сегодня/завтра/…» + (опционально) ", в HH[:MM]" + часть дня
+  const dayKw = s.match(/\b(сейчас|сегодня|завтра|послезавтра|вечер(?:ом)?|утр(?:ом)?|дн(?:ём|ем)|бүгін|ертең|қазір|кешке|таңертең|түсте)\b(?:\s*(?:,)?\s*в\s*\d{1,2}(?:[:.]\d{2})?\s*(?:час(?:а|ов)?|ч)?)?(?:\s*(утра|вечера|ночи|дня|днём|днем))?/);
   if (dayKw) return dayKw[0];
 
-  // 5) явное время: "в 17:20", "в 15 часов", "17:20", "3.45"
-  const atHhmm = s.match(/\b(?:в\s*)?\d{1,2}([:.]\d{2})\b/);
+  // 5) явное время: "в 17:20", "в 15", "в 3 часа", также без "в": "17:20", "3.45"
+  const atHhmm = s.match(/\b(?:в\s*)?\d{1,2}(?:[:.]\d{2})\b/);
   if (atHhmm) return atHhmm[0];
-  const atHourWord = s.match(/\bв\s*\d{1,2}\s*(?:час(а|ов)?|ч)\b/);
+  const atHourWord = s.match(/\bв\s*\d{1,2}\s*(?:час(?:а|ов)?|ч)?\b/); // «в 12» или «в 12 часов»
   if (atHourWord) return atHourWord[0];
 
-  // 6) «сегодня в 4 часа» (если не поймалось выше)
-  const todayAtHour = s.match(/\b(сегодня|завтра|бүгін|ертең)\s*в\s*\d{1,2}\s*(?:час(а|ов)?|ч)?\b/);
+  // 6) «сегодня/завтра в 4» — дубль, если пункт 4 не сработал из-за пунктуации
+  const todayAtHour = s.match(/\b(сегодня|завтра|бүгін|ертең)\b.*?\bв\s*\d{1,2}\s*(?:час(?:а|ов)?|ч)?\b/);
   if (todayAtHour) return todayAtHour[0];
 
-  // 7) дата: 31/08[/2025] или 31-08-2025
+  // 7) даты: 31/08[/2025], 31-08-2025
   const dmy = s.match(/\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b/);
   if (dmy) return dmy[0];
 
-  // 8) англ. короткие: today at 5pm, till 6pm, 5pm
-  const enAt = s.match(/\b(?:today|tomorrow)\s*(?:at\s*)?\d{1,2}([:.]\d{2})?\s*(?:am|pm)?\b/);
+  // 8) англ.: today at 5pm / till 6pm / 5pm
+  const enAt = s.match(/\b(?:today|tomorrow)\s*(?:at\s*)?\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?\b/);
   if (enAt) return enAt[0];
-  const enTime = s.match(/\b(?:till|until)\s*\d{1,2}([:.]\d{2})?\s*(?:am|pm)?\b/);
+  const enTime = s.match(/\b(?:till|until)\s*\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?\b/);
   if (enTime) return enTime[0];
 
   return null;
@@ -676,8 +680,14 @@ export default async function handler(req, res) {
 
       const topicsArr = guessTopics(userText, lastA?.content || "");
       const topic = topicsArr.length ? topicsArr.join(", ") : "Консультация";
-      const whenHit = extractWhen(userText);
-      const when    = whenHit ? whenHit : "-";
+      
+      let whenHit = extractWhen(userText);
+      if (!whenHit) {
+        const hist = await getHistory(chatId);
+        const bundle = buildRecentUserBundle(hist, userText, 4);
+        whenHit = extractWhen(bundle);
+      }
+      const when = whenHit ? whenHit : "-";
 
       let nameCandidate = extractName(userText);
       const name = nameCandidate || "-";

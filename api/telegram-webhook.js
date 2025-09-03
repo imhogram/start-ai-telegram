@@ -180,6 +180,9 @@ function extractWhen(t) {
   const dayKw = s.match(/\b(сейчас|сегодня|завтра|послезавтра|вечер(?:ом)?|утр(?:ом)?|дн(?:ём|ем)|сегодняшн(?:ий|им)|бүгін|ертең|қазір|кешке|таңертең|түсте)\b(?:\s*в\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?)?(?:\s*(утра|вечера|ночи|дня|днём|днем))?/);
   if (dayKw) return _cleanTail(dayKw[0]);
 
+  const dayPart = s.match(/\b(сегодня|завтра|послезавтра|бүгін|ертең)\s*(утром|вечером|днём|днем|ночью)?\b/);
+  if (dayPart) return dayPart[0];
+  
   const atHhmm = s.match(/\b(?:в\s*)?\d{1,2}([:.]\d{2})\b/);
   if (atHhmm) return _cleanTail(atHhmm[0]);
 
@@ -641,82 +644,94 @@ export default async function handler(req, res) {
     }
 
     // === REUSE CONTACT: есть сохранённый контакт -> новая услуга без телефона 
-    if (!handled) { 
-      const contact = await getContact(chatId); 
-      if (!booking.stage && contact?.phone && !hasPhone(userText)) { 
-        const hist  = await getHistory(chatId); 
-        const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
+if (!handled) { 
+  const contact = await getContact(chatId); 
+  if (!booking.stage && contact?.phone && !hasPhone(userText)) { 
+    const hist  = await getHistory(chatId); 
+    const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
 
-        const bundle = buildRecentUserBundle(hist, userText, 4);
-        const whenHit = extractWhen(userText) || extractWhen(bundle);
-        const when = whenHit ? _cleanTail(whenHit) : "-";
+    // берём время из текущего текста или из «бандла»
+    const bundle = buildRecentUserBundle(hist, userText, 4);
+    const whenHit = extractWhen(userText) || extractWhen(bundle);
+    const when = whenHit ? _cleanTail(whenHit) : "-";
 
-        const topicsArrMsg = guessTopics(userText, lastA?.content || "");
-        const topicFromMsg = topicsArrMsg.length ? topicsArrMsg.join(", ") : "Консультация";
+    // ТЕМЫ: объединяем найденное в текущем сообщении + в бандле + из последнего ответа ассистента
+    const fromMsg    = guessTopics(userText, lastA?.content || "");
+    const fromBundle = guessTopics(bundle,    lastA?.content || "");
+    const topicsArr  = Array.from(new Set([...fromMsg, ...fromBundle]));
+    const topicFromMsg = topicsArr.length ? topicsArr.join(", ") : "Консультация";
 
-        if (topicFromMsg && topicFromMsg !== "Консультация") {
-          preReply = L.booked[lang] || L.booked.en;
-          const adminId = getAdminId();
-          if (adminId) {
-            const adminMsg =
-              `🆕 Новая заявка чатбота:\n` +
-              `Тема: ${topicFromMsg}\n` +
-              `Время: ${when}\n` +
-              `Имя: ${contact.name || "-"}\n` +
-              `Телефон: ${contact.phone || "-"}\n` +
-              `Источник: tg chat_id ${chatId}`;
-            const r = await sendTG(adminId, adminMsg);
-            if (!r.ok) console.error("Failed to send reused-contact lead:", adminId);
-          } else {
-            console.error("ADMIN_CHAT_ID is not set or empty");
-          }
-
-          handled = true;
-        }
-      }
-    }
-
-    const bookTrigger = /консультац|запис|менеджер|оператор|поговор|қабылда|кеңес|consult|booking/i;
-
-    // === ONE-SHOT: в одном сообщении есть телефон
-    if (!handled && !booking.stage && hasPhone(userText)) {
-      const phone  = pickPhone(userText);
-      const hist   = await getHistory(chatId);
-      const lastA  = hist.filter(h => h.role === "assistant").slice(-1)[0];
-      // все темы
-      const topicsArr = guessTopics(userText, "");
-      const topic = topicsArr.length ? topicsArr.join(", ") : "Консультация";
-      // время: из этого сообщения или из недавнего «бандла»
-      let whenHit = extractWhen(userText);
-      if (!whenHit) {
-        const bundle = buildRecentUserBundle(hist, userText, 4);
-        whenHit = extractWhen(bundle);
-      }
-      const when = whenHit ? _cleanTail(whenHit) : "-";
-      // имя
-      const name = extractName(userText) || "-";
-      // ответ пользователю (на текущем языке)
+    if (topicFromMsg && topicFromMsg !== "Консультация") {
       preReply = L.booked[lang] || L.booked.ru;
-      // лид админу
+
       const adminId = getAdminId();
       if (adminId) {
         const adminMsg =
           `🆕 Новая заявка чатбота:\n` +
-          `Тема: ${topic}\n` +
+          `Тема: ${topicFromMsg}\n` +
           `Время: ${when}\n` +
-          `Имя: ${name}\n` +
-          `Телефон: ${phone}\n` +
+          `Имя: ${contact.name || "-"}\n` +
+          `Телефон: ${contact.phone || "-"}\n` +
           `Источник: tg chat_id ${chatId}`;
         const r = await sendTG(adminId, adminMsg);
-        if (!r.ok) console.error("Failed to send one-shot lead:", adminId);
+        if (!r.ok) console.error("Failed to send reused-contact lead:", adminId);
       } else {
         console.error("ADMIN_CHAT_ID is not set or empty");
       }
-      await setContact(chatId, { name, phone });
-      await clearBooking(chatId);
+
       handled = true;
     }
+  }
+}
+    // === END REUSE CONTACT ===
+    
+    const bookTrigger = /консультац|запис|менеджер|оператор|поговор|қабылда|кеңес|consult|booking/i;
+    
+    // === ONE-SHOT: в одном сообщении есть телефон ===
+if (!handled && !booking.stage && hasPhone(userText)) {
+  const phone  = pickPhone(userText);
+  const hist   = await getHistory(chatId);
+  const lastA  = hist.filter(h => h.role === "assistant").slice(-1)[0];
 
+  // ТЕМЫ: объединяем userText + bundle + lastAssistant; удаляем дубликаты
+  const bundle   = buildRecentUserBundle(hist, userText, 4);
+  const fromMsg  = guessTopics(userText, lastA?.content || "");
+  const fromBund = guessTopics(bundle,   lastA?.content || "");
+  const topicsArr = Array.from(new Set([...fromMsg, ...fromBund]));
+  const topic = topicsArr.length ? topicsArr.join(", ") : "Консультация";
+
+  // ВРЕМЯ: из этого сообщения или из бандла
+  let whenHit = extractWhen(userText) || extractWhen(bundle);
+  const when = whenHit ? _cleanTail(whenHit) : "-";
+
+  // ИМЯ
+  const name = extractName(userText) || "-";
+
+  // ответ пользователю (на текущем языке)
+  preReply = L.booked[lang] || L.booked.ru;
+
+  // лид админу
+  const adminId = getAdminId();
+  if (adminId) {
+    const adminMsg =
+      `🆕 Новая заявка чатбота:\n` +
+      `Тема: ${topic}\n` +
+      `Время: ${when}\n` +
+      `Имя: ${name}\n` +
+      `Телефон: ${phone}\n` +
+      `Источник: tg chat_id ${chatId}`;
+    const r = await sendTG(adminId, adminMsg);
+    if (!r.ok) console.error("Failed to send one-shot lead:", adminId);
+  } else {
+    console.error("ADMIN_CHAT_ID is not set or empty");
+  }
+
+  await setContact(chatId, { name, phone });
+  await clearBooking(chatId);
+  handled = true;
+}
+    // === END ONE-SHOT ===
+    
     // === Обычный запуск слотов по ключевым словам
     if (!handled && !booking.stage && bookTrigger.test(userText)) {
       const hist  = await getHistory(chatId);

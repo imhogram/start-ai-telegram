@@ -139,6 +139,10 @@ function pickPhone(t) {
   if (!m) return null;
   return m.sort((a,b)=> (b.match(/\d/g)||[]).length - (a.match(/\d/g)||[]).length)[0].trim();
 }
+// ПОСЛЕ блока pickPhone(...) добавь:
+function _cleanTail(str) {
+  return (str || "").replace(/[.,;!?…]+$/u, "").trim();
+}
 
 // ==== достаем имя из комбинированной фразы ====
 function extractName(text) {
@@ -164,41 +168,35 @@ function extractWhen(t) {
   if (!t) return null;
   const s = t.toLowerCase().replace(/\s+/g, " ").trim();
 
-  // 1) диапазоны: "с 14 до 16", "с 14:00 до 15:30", "с 2 до 3 часов", "с 10ч до 12ч"
   const range = s.match(/\b[сc]\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?\s*(?:до|-|—)\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?\b/);
-  if (range) return range[0];
+  if (range) return _cleanTail(range[0]);
 
-  // 2) "до 6 (вечера|утра|..)" – дедлайны
   const until = s.match(/\bдо\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?(?:\s*(утра|вечера|ночи|дня))?\b/);
-  if (until) return until[0];
+  if (until) return _cleanTail(until[0]);
 
-  // 3) относительное: "через час/полчаса/30 мин/2 часа"
   const rel = s.match(/\bчерез\s+(?:пол(?:-)?часа?|час(?:а)?|\d+\s*(?:час(?:а|ов)?|мин(?:ут)?))\b/);
-  if (rel) return rel[0];
+  if (rel) return _cleanTail(rel[0]);
 
-  // 4) "сегодня/завтра/..." [+ "в HH[:MM]"] [+ "утра/вечера"]
-  const dayKw = s.match(/\b(сейчас|сегодня|завтра|послезавтра|бүгін|ертең|қазір)\b(?:\s*в\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?)?(?:\s*(утра|вечера|ночи|дня|днём|днем))?/);
-  if (dayKw) return dayKw[0];
+  const dayKw = s.match(/\b(сейчас|сегодня|завтра|послезавтра|вечер(?:ом)?|утр(?:ом)?|дн(?:ём|ем)|сегодняшн(?:ий|им)|бүгін|ертең|қазір|кешке|таңертең|түсте)\b(?:\s*в\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?)?(?:\s*(утра|вечера|ночи|дня|днём|днем))?/);
+  if (dayKw) return _cleanTail(dayKw[0]);
 
-  // 5) «завтра 12» / «сегодня 15» (без "в")
-  const dayHourLoose = s.match(/\b(сегодня|завтра|послезавтра|бүгін|ертең)\s*\d{1,2}\b/);
-  if (dayHourLoose) return dayHourLoose[0];
-
-  // 6) явное время: "в 17:20" / "17:20" / "в 15 ч(асов)"
   const atHhmm = s.match(/\b(?:в\s*)?\d{1,2}([:.]\d{2})\b/);
-  if (atHhmm) return atHhmm[0];
+  if (atHhmm) return _cleanTail(atHhmm[0]);
+
   const atHourWord = s.match(/\bв\s*\d{1,2}\s*(?:час(а|ов)?|ч)\b/);
-  if (atHourWord) return atHourWord[0];
+  if (atHourWord) return _cleanTail(atHourWord[0]);
 
-  // 7) дата: 31/08[/2025] или 31-08-2025
+  const todayAtHour = s.match(/\b(сегодня|завтра|бүгін|ертең)\s*в\s*\d{1,2}\s*(?:час(а|ов)?|ч)?\b/);
+  if (todayAtHour) return _cleanTail(todayAtHour[0]);
+
   const dmy = s.match(/\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b/);
-  if (dmy) return dmy[0];
+  if (dmy) return _cleanTail(dmy[0]);
 
-  // 8) английские: "today at 5", "till 6pm", "5pm"
   const enAt = s.match(/\b(?:today|tomorrow)\s*(?:at\s*)?\d{1,2}([:.]\d{2})?\s*(?:am|pm)?\b/);
-  if (enAt) return enAt[0];
+  if (enAt) return _cleanTail(enAt[0]);
+
   const enTime = s.match(/\b(?:till|until)\s*\d{1,2}([:.]\d{2})?\s*(?:am|pm)?\b/);
-  if (enTime) return enTime[0];
+  if (enTime) return _cleanTail(enTime[0]);
 
   return null;
 }

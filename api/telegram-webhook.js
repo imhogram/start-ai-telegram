@@ -168,6 +168,12 @@ function extractWhen(t) {
   if (!t) return null;
   const s = t.toLowerCase().replace(/\s+/g, " ").trim();
 
+  const s = t
+  .toLowerCase()
+  .replace(/[\u00A0\u202F\u2009]/g, " ") // NBSP, NNBSP, thin space -> обычный пробел
+  .replace(/\s+/g, " ")
+  .trim();
+
   const range = s.match(/\b[сc]\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?\s*(?:до|-|—)\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?\b/);
   if (range) return _cleanTail(range[0]);
 
@@ -246,6 +252,7 @@ function buildRecentUserBundle(history, currentUserText, n = 4) {
   return [...recentUsers, currentUserText].join(" • ");
 }
 
+// === БЕРЕМ ВРЕМЯ из текущего текста ИЛИ из бандла ===
 function collectLeadFromRecent(history, currentUserText, lastAssistantText) {
   const bundle = buildRecentUserBundle(history, currentUserText, 4);
 
@@ -256,13 +263,15 @@ function collectLeadFromRecent(history, currentUserText, lastAssistantText) {
     .sort((a,b)=> (b.match(/\d/g)||[]).length - (a.match(/\d/g)||[]).length)[0]
     .trim();
 
-  // topics
-  const topics = guessTopics(bundle, "");
+  // topics (по пользователю + (опц.) по ассистенту, чтобы схватывать несколько тем)
+  const topics = guessTopics(bundle, lastAssistantText || "");
   const topic  = topics.length ? topics.join(", ") : "Консультация";
 
-  // when
-  const whenHit = extractWhen(bundle);
-  const when    = whenHit ? whenHit : "-";
+  // when — СНАЧАЛА из текущего сообщения, потом из бандла
+  const whenHitDirect = extractWhen(currentUserText);
+  const whenHitBundle = whenHitDirect ? null : extractWhen(bundle);
+  const whenRaw = whenHitDirect || whenHitBundle;
+  const when = whenRaw ? _cleanTail(whenRaw) : "-";
 
   // name
   let name = extractName(bundle) || "-";

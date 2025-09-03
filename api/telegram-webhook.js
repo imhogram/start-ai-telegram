@@ -163,32 +163,38 @@ function extractName(text) {
   return null;
 }
 
-// ==== Мощное извлечение времени/дат/диапазонов ====
+// ==== Мощное извлечение Времени/Дат/Диапазонов ====
 function extractWhen(t) {
   if (!t) return null;
-  const s = t.toLowerCase().replace(/\s+/g, " ").trim();
 
+  // Нормализация пробелов и регистра
   const s = t
-  .toLowerCase()
-  .replace(/[\u00A0\u202F\u2009]/g, " ") // NBSP, NNBSP, thin space -> обычный пробел
-  .replace(/\s+/g, " ")
-  .trim();
+    .toLowerCase()
+    .replace(/[\u00A0\u202F\u2009]/g, " ") // NBSP, NNBSP, thin space -> обычный пробел
+    .replace(/\s+/g, " ")
+    .trim();
 
+  // 1) диапазоны
   const range = s.match(/\b[сc]\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?\s*(?:до|-|—)\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?\b/);
   if (range) return _cleanTail(range[0]);
 
+  // 2) "до 6 ..."
   const until = s.match(/\bдо\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?(?:\s*(утра|вечера|ночи|дня))?\b/);
   if (until) return _cleanTail(until[0]);
 
+  // 3) "через ..."
   const rel = s.match(/\bчерез\s+(?:пол(?:-)?часа?|час(?:а)?|\d+\s*(?:час(?:а|ов)?|мин(?:ут)?))\b/);
   if (rel) return _cleanTail(rel[0]);
 
+  // 4) сегодня/завтра/… [+ "в HH[:MM]"] [+ "утра/вечера"]
   const dayKw = s.match(/\b(сейчас|сегодня|завтра|послезавтра|вечер(?:ом)?|утр(?:ом)?|дн(?:ём|ем)|сегодняшн(?:ий|им)|бүгін|ертең|қазір|кешке|таңертең|түсте)\b(?:\s*в\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?)?(?:\s*(утра|вечера|ночи|дня|днём|днем))?/);
   if (dayKw) return _cleanTail(dayKw[0]);
 
+  // 5) "сегодня/завтра утром/вечером/днём"
   const dayPart = s.match(/\b(сегодня|завтра|послезавтра|бүгін|ертең)\s*(утром|вечером|днём|днем|ночью)?\b/);
-  if (dayPart) return dayPart[0];
-  
+  if (dayPart) return _cleanTail(dayPart[0]);
+
+  // 6) явное время
   const atHhmm = s.match(/\b(?:в\s*)?\d{1,2}([:.]\d{2})\b/);
   if (atHhmm) return _cleanTail(atHhmm[0]);
 
@@ -198,9 +204,11 @@ function extractWhen(t) {
   const todayAtHour = s.match(/\b(сегодня|завтра|бүгін|ертең)\s*в\s*\d{1,2}\s*(?:час(а|ов)?|ч)?\b/);
   if (todayAtHour) return _cleanTail(todayAtHour[0]);
 
+  // 7) дата
   const dmy = s.match(/\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b/);
   if (dmy) return _cleanTail(dmy[0]);
 
+  // 8) EN-варианты
   const enAt = s.match(/\b(?:today|tomorrow)\s*(?:at\s*)?\d{1,2}([:.]\d{2})?\s*(?:am|pm)?\b/);
   if (enAt) return _cleanTail(enAt[0]);
 

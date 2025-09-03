@@ -162,46 +162,42 @@ function extractName(text) {
 // ==== Мощное извлечение времени/дат/диапазонов ====
 function extractWhen(t) {
   if (!t) return null;
-  // нормализуем пробелы и убираем лишние запятые перед "в"
-  const s = t.toLowerCase()
-    .replace(/\s+/g, " ")
-    .replace(/[,;\-–—]\s*в\s+/g, " в ")
-    .trim();
+  const s = t.toLowerCase().replace(/\s+/g, " ").trim();
 
-  // 1) диапазоны: "с 14 до 16", "с 14:00 до 15:30", "с 2 до 3 часов"
-  const range = s.match(/\b[сc]\s*\d{1,2}(?:[:.]\d{2})?\s*(?:час(?:а|ов)?|ч)?\s*(?:до|-|—)\s*\d{1,2}(?:[:.]\d{2})?\s*(?:час(?:а|ов)?|ч)?\b/);
+  // 1) диапазоны: "с 14 до 16", "с 14:00 до 15:30", "с 2 до 3 часов", "с 10ч до 12ч"
+  const range = s.match(/\b[сc]\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?\s*(?:до|-|—)\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?\b/);
   if (range) return range[0];
 
-  // 2) дедлайн: "до 6 вечера/утра/…"
-  const until = s.match(/\bдо\s*\d{1,2}(?:[:.]\d{2})?\s*(?:час(?:а|ов)?|ч)?(?:\s*(утра|вечера|ночи|дня))?\b/);
+  // 2) "до 6 (вечера|утра|..)" – дедлайны
+  const until = s.match(/\bдо\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?(?:\s*(утра|вечера|ночи|дня))?\b/);
   if (until) return until[0];
 
   // 3) относительное: "через час/полчаса/30 мин/2 часа"
   const rel = s.match(/\bчерез\s+(?:пол(?:-)?часа?|час(?:а)?|\d+\s*(?:час(?:а|ов)?|мин(?:ут)?))\b/);
   if (rel) return rel[0];
 
-  // 4) «сегодня/завтра/…» + (опционально) ", в HH[:MM]" + часть дня
-  const dayKw = s.match(/\b(сейчас|сегодня|завтра|послезавтра|вечер(?:ом)?|утр(?:ом)?|дн(?:ём|ем)|бүгін|ертең|қазір|кешке|таңертең|түсте)\b(?:\s*(?:,)?\s*в\s*\d{1,2}(?:[:.]\d{2})?\s*(?:час(?:а|ов)?|ч)?)?(?:\s*(утра|вечера|ночи|дня|днём|днем))?/);
+  // 4) "сегодня/завтра/..." [+ "в HH[:MM]"] [+ "утра/вечера"]
+  const dayKw = s.match(/\b(сейчас|сегодня|завтра|послезавтра|бүгін|ертең|қазір)\b(?:\s*в\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?)?(?:\s*(утра|вечера|ночи|дня|днём|днем))?/);
   if (dayKw) return dayKw[0];
 
-  // 5) явное время: "в 17:20", "в 15", "в 3 часа", также без "в": "17:20", "3.45"
-  const atHhmm = s.match(/\b(?:в\s*)?\d{1,2}(?:[:.]\d{2})\b/);
+  // 5) «завтра 12» / «сегодня 15» (без "в")
+  const dayHourLoose = s.match(/\b(сегодня|завтра|послезавтра|бүгін|ертең)\s*\d{1,2}\b/);
+  if (dayHourLoose) return dayHourLoose[0];
+
+  // 6) явное время: "в 17:20" / "17:20" / "в 15 ч(асов)"
+  const atHhmm = s.match(/\b(?:в\s*)?\d{1,2}([:.]\d{2})\b/);
   if (atHhmm) return atHhmm[0];
-  const atHourWord = s.match(/\bв\s*\d{1,2}\s*(?:час(?:а|ов)?|ч)?\b/); // «в 12» или «в 12 часов»
+  const atHourWord = s.match(/\bв\s*\d{1,2}\s*(?:час(а|ов)?|ч)\b/);
   if (atHourWord) return atHourWord[0];
 
-  // 6) «сегодня/завтра в 4» — дубль, если пункт 4 не сработал из-за пунктуации
-  const todayAtHour = s.match(/\b(сегодня|завтра|бүгін|ертең)\b.*?\bв\s*\d{1,2}\s*(?:час(?:а|ов)?|ч)?\b/);
-  if (todayAtHour) return todayAtHour[0];
-
-  // 7) даты: 31/08[/2025], 31-08-2025
+  // 7) дата: 31/08[/2025] или 31-08-2025
   const dmy = s.match(/\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b/);
   if (dmy) return dmy[0];
 
-  // 8) англ.: today at 5pm / till 6pm / 5pm
-  const enAt = s.match(/\b(?:today|tomorrow)\s*(?:at\s*)?\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?\b/);
+  // 8) английские: "today at 5", "till 6pm", "5pm"
+  const enAt = s.match(/\b(?:today|tomorrow)\s*(?:at\s*)?\d{1,2}([:.]\d{2})?\s*(?:am|pm)?\b/);
   if (enAt) return enAt[0];
-  const enTime = s.match(/\b(?:till|until)\s*\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm)?\b/);
+  const enTime = s.match(/\b(?:till|until)\s*\d{1,2}([:.]\d{2})?\s*(?:am|pm)?\b/);
   if (enTime) return enTime[0];
 
   return null;
@@ -251,19 +247,23 @@ function buildRecentUserBundle(history, currentUserText, n = 4) {
 
 function collectLeadFromRecent(history, currentUserText, lastAssistantText) {
   const bundle = buildRecentUserBundle(history, currentUserText, 4);
+
   // phone
   const phoneMatch = bundle.match(/[\+\d][\d\-\s().]{5,}/g);
   if (!phoneMatch) return null;
   const phone = phoneMatch
     .sort((a,b)=> (b.match(/\d/g)||[]).length - (a.match(/\d/g)||[]).length)[0]
     .trim();
-  // topics (возможны несколько)
-  const topicsArr = guessTopics(bundle, lastAssistantText || "");
-  const topic = topicsArr.length ? topicsArr.join(", ") : "Консультация";
+
+  // topics
+  const topics = guessTopics(bundle, lastAssistantText || "");
+  const topic  = topics.length ? topics.join(", ") : "Консультация";
+
   // when
   const whenHit = extractWhen(bundle);
-  const when = whenHit ? whenHit : "-";
-  // name: пробуем аккуратно вытащить из фразы; если не нашли — ищем короткий токен без цифр
+  const when    = whenHit ? whenHit : "-";
+
+  // name
   let name = extractName(bundle) || "-";
   if (name === "-") {
     const parts = bundle.split(/[•,;\n]+/).map(s => s.trim());
@@ -271,6 +271,7 @@ function collectLeadFromRecent(history, currentUserText, lastAssistantText) {
       if (isNameLike(c)) { name = c; break; }
     }
   }
+
   return { topic, when, name, phone };
 }
 // ==== END TOPICS BLOCK ====
@@ -572,17 +573,19 @@ export default async function handler(req, res) {
       await redis.del(`hist:${chatId}`);
       await redis.del(`book:${chatId}`);
       await clearContact(chatId);
-      const current = (await redis.get(LANG_KEY(chatId))) || detectLang(userText) || "ru";
-      await sendTG(chatId, L.resetDone[current] || L.resetDone.ru);
+      const langAfterReset = (await redis.get(LANG_KEY(chatId))) || "ru";
+      await redis.set(LANG_KEY(chatId), langAfterReset, { ex: 60 * 60 * 24 * 30 });
+      await sendTG(chatId, L.resetDone[langAfterReset] || L.resetDone.ru);
       res.statusCode = 200;
       return res.end(JSON.stringify({ ok: true }));
     }
 
     // 3) Вычисляем язык: приоритет сохранённого; переключаемся только при уверенном сигнале
     const stored = await redis.get(LANG_KEY(chatId));
-    const guess = confidentLangSwitch(userText);
+    const guess  = confidentLangSwitch(userText);
     let lang = (stored || guess || "ru");
     if (!stored || (guess && guess !== stored)) {
+      lang = guess || "ru";
       await redis.set(LANG_KEY(chatId), lang, { ex: 60 * 60 * 24 * 30 });
     }
 
@@ -643,10 +646,12 @@ export default async function handler(req, res) {
     if (!handled) {
       const contact = await getContact(chatId);
       if (!booking.stage && contact?.phone && !hasPhone(userText)) {
-        const whenHit = extractWhen(userText);
+        const whenHit = extractWhen(userText) || extractWhen(buildRecentUserBundle(await getHistory(chatId), userText, 4));
         const when = whenHit ? whenHit : "-";
-        const topicsArrMsg = guessTopics(userText, "");  // только по тексту пользователя
+        
+        const topicsArrMsg = guessTopics(userText, "");
         const topicFromMsg = topicsArrMsg.length ? topicsArrMsg.join(", ") : "Консультация";
+
         if (topicFromMsg && topicFromMsg !== "Консультация") {
           preReply = L.booked[lang] || L.booked.en;
 
@@ -687,8 +692,9 @@ export default async function handler(req, res) {
         const bundle = buildRecentUserBundle(hist, userText, 4);
         whenHit = extractWhen(bundle);
       }
+      const whenHit = extractWhen(userText) || extractWhen(buildRecentUserBundle(await getHistory(chatId), userText, 4));
       const when = whenHit ? whenHit : "-";
-
+      
       let nameCandidate = extractName(userText);
       const name = nameCandidate || "-";
 
@@ -740,7 +746,16 @@ export default async function handler(req, res) {
       handled = true;
     }
     else if (!handled && booking.stage === "when") {
-      const whenHit = extractWhen(userText);
+      // сперва пытаемся вытащить из текущего сообщения
+      let whenHit = extractWhen(userText);
+
+      // если не нашли — пробуем из последних 3–4 пользовательских фраз + текущей
+      if (!whenHit) {
+        const hist = await getHistory(chatId);
+        const bundle = buildRecentUserBundle(hist, userText, 4);
+        whenHit = extractWhen(bundle);
+      }
+
       if (whenHit) {
         booking.when = whenHit.trim();
         booking.stage = "name";
@@ -751,6 +766,7 @@ export default async function handler(req, res) {
       }
       handled = true;
     }
+      
     else if (!handled && booking.stage === "name") {
       if (isNameLike(userText)) {
         booking.name = userText;
@@ -766,23 +782,27 @@ export default async function handler(req, res) {
       }
       handled = true;
     }
+
     else if (!handled && booking.stage === "phone") {
       if (phoneOk(userText)) {
         booking.phone = userText;
-
-        // подстраховка: если ранее не поймали when/name, попробуем собрать из последних реплик
+        // Подстраховка: если не поймали when/name/topic — собираем из последних реплик
         const hist  = await getHistory(chatId);
         const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
-        if (!booking.when || !booking.name) {
-          const agg = collectLeadFromRecent(hist, userText, lastA?.content || "");
-          booking.when = booking.when || (agg?.when || "-");
-          booking.name = booking.name || (agg?.name || "-");
-          booking.topic = booking.topic || (agg?.topic || "Консультация");
-          await setBooking(chatId, booking);
+        // 2.1 — время: если пусто/прочерк — вытягиваем из бандла
+        if (!booking.when || booking.when === "-") {
+          const bundle = buildRecentUserBundle(hist, userText, 4);
+          const aggWhen = extractWhen(bundle);
+          if (aggWhen) booking.when = aggWhen.trim();
         }
-
-        preReply = L.booked[lang] || L.booked.en;
-
+        // 2.2 — имя/тема: как и раньше
+        if (!booking.name) {
+          const agg = collectLeadFromRecent(hist, userText, lastA?.content || "");
+          booking.name  = booking.name  || (agg?.name  || "-");
+          booking.topic = booking.topic || (agg?.topic || "Консультация");
+        }
+        preReply = L.booked[lang] || L.booked.ru; // подстраховка на RU
+        // Отправляем админу
         const adminId = getAdminId();
         if (adminId) {
           const adminMsg =
@@ -797,7 +817,6 @@ export default async function handler(req, res) {
         } else {
           console.error("ADMIN_CHAT_ID is not set or empty");
         }
-
         await setContact(chatId, { name: booking.name, phone: booking.phone });
         await clearBooking(chatId);
       } else {

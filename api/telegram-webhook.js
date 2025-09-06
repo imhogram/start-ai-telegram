@@ -8,11 +8,14 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
-// ==== Константы ====
+// ==== Константы / ключи ====
 const HISTORY_LEN = 8; // последние 8 сообщений
 const LANG_KEY = (chatId) => `lang:${chatId}`;
+const LAST_LEAD_KEY = (chatId) => `lastlead:${chatId}`;
+const PENDING_OFFER_KEY = (chatId) => `offer:${chatId}`;
+const LEAD_COOLDOWN_SEC = 10 * 60; // 10 минут
 
-// ==== Утилита чтения "сырого" тела запроса (нужно для serverless) ====
+// ==== Утилита чтения "сырого" тела запроса ====
 async function readBody(req) {
   return await new Promise((resolve, reject) => {
     let data = "";
@@ -25,7 +28,7 @@ async function readBody(req) {
 // ==== Безопасный парсер значений из Redis ====
 function safeParseItem(item) {
   if (item == null) return null;
-  if (typeof item === "object") return item; // уже объект
+  if (typeof item === "object") return item;
   if (typeof item === "string") {
     try { return JSON.parse(item); } catch { return null; }
   }
@@ -46,9 +49,7 @@ async function pushHistory(chatId, role, content) {
 // ==== Машина слотов записи ====
 async function getBooking(chatId) {
   const val = await redis.get(`book:${chatId}`);
-  if (!val) {
-    return { stage: null, topic: null, when: null, name: null, phone: null };
-  }
+  if (!val) return { stage: null, topic: null, when: null, name: null, phone: null };
   if (typeof val === "object") return val;
   try { return JSON.parse(val); } catch {
     return { stage: null, topic: null, when: null, name: null, phone: null };
@@ -85,7 +86,7 @@ function detectLang(text) {
   return "en";
 }
 
-// ==== "Уверенное" переключение языка (не реагируем на цифры/эмодзи) ====
+// ==== "Уверенное" переключение языка ====
 function confidentLangSwitch(text) {
   if (!text || text.trim().length === 0) return null;
   if (/русск|рос/iu.test(text)) return "ru";
@@ -97,41 +98,23 @@ function confidentLangSwitch(text) {
   const hasKazChars = /[әғқңөұүһі]/i.test(text);
   const hasKazHints = /(саламат|салем|рахмет|жаксы|бар\s*ма|сендер|сиздер|ия\b|жок\b|қалай)/i.test(text);
   if (hasKazChars || hasKazHints) return "kz";
-  return null; // иначе не трогаем текущий язык
+  return null;
 }
 
 // ==== Валидаторы/хелперы ====
-function isTimeLike(t) { // оставим как мягкий флаг (уже почти не используем)
-  if (!t) return false;
-  const s = t.toLowerCase();
-  if (/через\s+(пол|пол-)?часа?\b/.test(s)) return true;
-  if (/через\s+\d+\s*(час(а|ов)?|мин(ут)?)/.test(s)) return true;
-  if (/(now|right now)/.test(s)) return true;
-  if (/\b(сейчас|вечер|вечером|утро|утром|день|днем|сегодня|завтра|послезавтра)\b/.test(s)) return true;
-  if (/\b(қазір|кешке|таңертең|түсте|бүгін|ертең)\b/.test(s)) return true;
-  if (/\b(today|tomorrow|evening|morning|afternoon)\b/.test(s)) return true;
-  if (/\b\d{1,2}[:.]\d{2}\b/.test(s)) return true;
-  if (/\b\d{1,2}[\/-]\d{1,2}([\/-]\d{2,4})?\b/.test(s)) return true;
-  return false;
-}
-
 function isNameLike(t) {
   if (!t) return false;
   if ((t.match(/\d/g) || []).length > 0) return false;
   const s = t.trim();
   if (s.length < 2 || s.length > 40) return false;
-  // отсекаем приветствия/служебные слова
   const STOP = /^(здравствуй|здравствуйте|привет|добрый\s*(день|вечер|утро)|салют|hello|hi|сәлем|салем|саламат|да|ок|окей|today|tomorrow|сегодня|завтра|днём|днем|вечером|утром)$/i;
   if (STOP.test(s)) return false;
   const words = s.split(/\s+/);
   if (words.length > 3) return false;
   if (!/[A-Za-zА-Яа-яЁёӘәҒғҚқҢңӨөҰұҮүҺһІі]/.test(s)) return false;
-  // хотя бы одно слово начинается с заглавной — очень вероятно имя
   if (!/(^|\s)[A-ZА-ЯӘҒҚҢӨҰҮҺІ]/.test(s)) return false;
   return true;
 }
-
-// >=6 цифр — считаем валидным телефоном
 function phoneOk(t) { return ((t.match(/\d/g) || []).length) >= 6; }
 function hasPhone(t) { return ((t.match(/\d/g) || []).length) >= 6; }
 function pickPhone(t) {
@@ -139,23 +122,18 @@ function pickPhone(t) {
   if (!m) return null;
   return m.sort((a,b)=> (b.match(/\d/g)||[]).length - (a.match(/\d/g)||[]).length)[0].trim();
 }
-// ПОСЛЕ блока pickPhone(...) добавь:
 function _cleanTail(str) {
   return (str || "").replace(/[.,;!?…]+$/u, "").trim();
 }
 
-// ==== достаем имя из комбинированной фразы ====
+// ==== Имя ====
 function extractName(text) {
   if (!text) return null;
-  // часть до телефона
   const beforePhone = text.split(/[\+\d][\d\-\s().]{5,}/)[0] || text;
-  // бежим с конца по кускам, отделённым запятой/точкой с запятой/маркером •/переводом строки
   const parts = beforePhone.split(/[•,;\n]+/).map(s => s.trim()).filter(Boolean);
   for (let i = parts.length - 1; i >= 0; i--) {
-    // уберём «я ...»
     const cand = parts[i].replace(/^я\s+/i, "");
     if (isNameLike(cand)) return cand;
-    // иногда имя — последнее слово в куске
     const tokens = cand.split(/\s+/);
     const last = tokens[tokens.length - 1];
     if (isNameLike(last)) return last;
@@ -163,14 +141,12 @@ function extractName(text) {
   return null;
 }
 
-// ==== Мощное извлечение Времени/Дат/Диапазонов ====
+// ==== Мощное извлечение времени/дат/диапазонов ====
 function extractWhen(t) {
   if (!t) return null;
-
-  // Нормализация: невидимые пробелы, множественные пробелы, трим
   const s = t
     .toLowerCase()
-    .replace(/[\u00A0\u202F\u2009]/g, " ") // NBSP, NNBSP, thin space -> обычный пробел
+    .replace(/[\u00A0\u202F\u2009]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -186,11 +162,11 @@ function extractWhen(t) {
   const rel = s.match(/\bчерез\s+(?:пол(?:-)?часа?|час(?:а)?|\d+\s*(?:час(?:а|ов)?|мин(?:ут)?))\b/);
   if (rel) return _cleanTail(rel[0]);
 
-  // 4) ключевые слова дня + опционально "в HH[:MM]" + часть дня
+  // 4) ключевые слова дня + опц. «в HH:MM» + часть дня
   const dayKw = s.match(/\b(сейчас|сегодня|завтра|послезавтра|бүгін|ертең|қазір|вечер(?:ом)?|утр(?:ом)?|дн(?:ём|ем))\b(?:\s*в\s*\d{1,2}([:.]\d{2})?\s*(?:час(а|ов)?|ч)?)?(?:\s*(утра|вечера|ночи|дня|днём|днем))?/);
   if (dayKw) return _cleanTail(dayKw[0]);
 
-  // 4.1) словесные части дня без указания даты: "с утра", "до обеда", ...
+  // 4.1) словесные части дня
   const dayparts = [
     /\bв\s*полдень\b/,
     /\bс\s*утра\b/,
@@ -200,7 +176,6 @@ function extractWhen(t) {
     /\bдо\s*вечера\b/,
     /\bв\s*первой\s*половине\s*дня\b/,
     /\bво\s*второй\s*половине\s*дня\b/,
-    // доп. варианты, если захочешь:
     /\bк\s*обеду\b/,
     /\bк\s*вечеру\b/,
   ];
@@ -208,8 +183,8 @@ function extractWhen(t) {
     const m = s.match(re);
     if (m) return _cleanTail(m[0]);
   }
-  
-  // 5) «сегодня/завтра/послезавтра (утром/вечером/днём)» — даже без "в"
+
+  // 5) «сегодня/завтра ... (утром/вечером/днём)»
   const dayPart = s.match(/\b(сегодня|завтра|послезавтра|бүгін|ертең)(?:\s*(утром|вечером|днём|днем|ночью))?\b/);
   if (dayPart) return _cleanTail(dayPart[0]);
 
@@ -234,64 +209,7 @@ function extractWhen(t) {
   return null;
 }
 
-// ВСПОМОГАЛКИ (рядом с другими хелперами)
-// Все поля действительно собраны?
-function hasAllBookingFields(b) {
-  return !!(
-    b &&
-    b.topic && b.topic !== "Консультация" &&
-    b.when  && b.when  !== "-" &&
-    b.name  && b.name  !== "-" &&
-    b.phone && b.phone !== "-"
-  );
-}
-
-// Что спрашиваем дальше? (тему не форсируем — пытаемся вывести сами)
-function decideNextStage(b) {
-  if (!b.when  || b.when  === "-") return "when";
-  if (!b.name  || b.name  === "-") return "name";
-  if (!b.phone || b.phone === "-") return "phone";
-  return null; // всё собрано
-}
-
-// Универсальная автоподстановка из текущего текста + бандла + последнего ответа ассистента
-async function tryAutofillFrom(chatId, booking, userText) {
-  const hist   = await getHistory(chatId);
-  const lastA  = hist.filter(h => h.role === "assistant").slice(-1)[0];
-  const bundle = buildRecentUserBundle(hist, userText, 4);
-
-  // WHEN
-  if (!booking.when || booking.when === "-") {
-    const w = extractWhen(userText) ||
-              extractWhen(bundle)   ||
-              (lastA?.content ? extractWhen(lastA.content) : null);
-    if (w) booking.when = _cleanTail(w);
-  }
-
-  // NAME
-  if (!booking.name || booking.name === "-") {
-    const n = extractName(userText) || extractName(bundle);
-    if (n && isNameLike(n)) booking.name = n;
-  }
-
-  // PHONE
-  if (!booking.phone || booking.phone === "-") {
-    const p = pickPhone(userText) || pickPhone(bundle);
-    if (p && phoneOk(p)) booking.phone = p;
-  }
-
-  // TOPIC (сливаем из userText + bundle + последнего ответа ассистента)
-  if (!booking.topic || booking.topic === "Консультация") {
-    const fromMsg    = guessTopics(userText, lastA?.content || "");
-    const fromBundle = guessTopics(bundle,    lastA?.content || "");
-    const topicsArr  = Array.from(new Set([...fromMsg, ...fromBundle]));
-    if (topicsArr.length) booking.topic = topicsArr.join(", ");
-  }
-
-  return booking;
-}
-
-// ==== TOPICS: покрываем темами все услуги из списка ====
+// ==== TOPICS ====
 const TOPIC_PATTERNS = [
   { re: /(масштаб|growth|scale|стратегия\s*развития|развитие бренда|позиционир(ование)?)/i, topic: "Масштабирование и стратегия развития" },
   { re: /(маркетинг(овый)?\s*анализ|анализ\s*рынка|целев(ая|ой)\s*аудитор|конкурент|ценообраз|target\s*market)/i, topic: "Маркетинговый анализ" },
@@ -322,12 +240,10 @@ function guessTopics(userText, lastAssistant = "") {
   for (const p of TOPIC_PATTERNS) if (p.re.test(a)) found.add(p.topic);
   return Array.from(found);
 }
-
 function guessTopicFrom(userText, lastAssistant = "") {
   const arr = guessTopics(userText, lastAssistant);
   return arr.length ? arr[0] : "Консультация";
 }
-
 function buildRecentUserBundle(history, currentUserText, n = 4) {
   const recentUsers = history.filter(h => h.role === "user").slice(-n).map(h => h.content || "");
   return [...recentUsers, currentUserText].join(" • ");
@@ -337,24 +253,20 @@ function buildRecentUserBundle(history, currentUserText, n = 4) {
 function collectLeadFromRecent(history, currentUserText, lastAssistantText) {
   const bundle = buildRecentUserBundle(history, currentUserText, 4);
 
-  // phone
   const phoneMatch = bundle.match(/[\+\d][\d\-\s().]{5,}/g);
   if (!phoneMatch) return null;
   const phone = phoneMatch
     .sort((a,b)=> (b.match(/\d/g)||[]).length - (a.match(/\d/g)||[]).length)[0]
     .trim();
 
-  // topics (по пользователю + (опц.) по ассистенту, чтобы схватывать несколько тем)
   const topics = guessTopics(bundle, lastAssistantText || "");
   const topic  = topics.length ? topics.join(", ") : "Консультация";
 
-  // when — СНАЧАЛА из текущего сообщения, потом из бандла
   const whenHitDirect = extractWhen(currentUserText);
   const whenHitBundle = whenHitDirect ? null : extractWhen(bundle);
   const whenRaw = whenHitDirect || whenHitBundle;
   const when = whenRaw ? _cleanTail(whenRaw) : "-";
 
-  // name
   let name = extractName(bundle) || "-";
   if (name === "-") {
     const parts = bundle.split(/[•,;\n]+/).map(s => s.trim());
@@ -365,9 +277,96 @@ function collectLeadFromRecent(history, currentUserText, lastAssistantText) {
 
   return { topic, when, name, phone };
 }
-// ==== END TOPICS BLOCK ====
 
-// ==== Локализация служебных фраз ====
+// ==== Антидубликатор тем ====
+function normalizeTopicString(t) {
+  return (t || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[.,;!?\-–—]+/g, " ")
+    .trim();
+}
+function topicsSimilar(a, b) {
+  const A = new Set(normalizeTopicString(a).split(" ").filter(Boolean));
+  const B = new Set(normalizeTopicString(b).split(" ").filter(Boolean));
+  if (!A.size || !B.size) return false;
+  let inter = 0;
+  for (const w of A) if (B.has(w)) inter++;
+  const score = inter / Math.min(A.size, B.size);
+  return score >= 0.5;
+}
+async function getLastLead(chatId) {
+  const raw = await redis.get(LAST_LEAD_KEY(chatId));
+  if (!raw) return null;
+  try { return typeof raw === "string" ? JSON.parse(raw) : raw; } catch { return null; }
+}
+async function setLastLead(chatId, lead) {
+  const payload = { ...lead, ts: Math.floor(Date.now()/1000) };
+  await redis.set(LAST_LEAD_KEY(chatId), JSON.stringify(payload), { ex: 60 * 60 * 12 });
+}
+function withinCooldown(ts, sec = LEAD_COOLDOWN_SEC) {
+  if (!ts) return false;
+  const now = Math.floor(Date.now()/1000);
+  return (now - ts) < sec;
+}
+
+// ==== ВСПОМОГАЛКИ для слотов ====
+function hasAllBookingFields(b) {
+  return !!(
+    b &&
+    b.topic && b.topic !== "Консультация" &&
+    b.when  && b.when  !== "-" &&
+    b.name  && b.name  !== "-" &&
+    b.phone && b.phone !== "-"
+  );
+}
+function decideNextStage(b) {
+  if (!b.when  || b.when  === "-") return "when";
+  if (!b.name  || b.name  === "-") return "name";
+  if (!b.phone || b.phone === "-") return "phone";
+  return null;
+}
+async function tryAutofillFrom(chatId, booking, userText) {
+  const hist   = await getHistory(chatId);
+  const lastA  = hist.filter(h => h.role === "assistant").slice(-1)[0];
+  const bundle = buildRecentUserBundle(hist, userText, 4);
+
+  if (!booking.when || booking.when === "-") {
+    const w = extractWhen(userText) || extractWhen(bundle) || (lastA?.content ? extractWhen(lastA.content) : null);
+    if (w) booking.when = _cleanTail(w);
+  }
+  if (!booking.name || booking.name === "-") {
+    const n = extractName(userText) || extractName(bundle);
+    if (n && isNameLike(n)) booking.name = n;
+  }
+  if (!booking.phone || booking.phone === "-") {
+    const p = pickPhone(userText) || pickPhone(bundle);
+    if (p && phoneOk(p)) booking.phone = p;
+  }
+  if (!booking.topic || booking.topic === "Консультация") {
+    const fromMsg    = guessTopics(userText, lastA?.content || "");
+    const fromBundle = guessTopics(bundle,    lastA?.content || "");
+    const topicsArr  = Array.from(new Set([...fromMsg, ...fromBundle]));
+    if (topicsArr.length) booking.topic = topicsArr.join(", ");
+  }
+  return booking;
+}
+
+// Явный триггер на запуск слотов (чтобы не начинать на «Здравствуйте»)
+const bookTrigger = /консультац|запис|менеджер|оператор|поговор|қабылда|кеңес|consult|booking/i;
+async function shouldStartBooking(userText, chatId) {
+  if (!userText || userText.length < 2) return false;
+  if (bookTrigger.test(userText)) return true;
+  if (hasPhone(userText)) return true;
+  if (extractWhen(userText)) return true;
+  // если в тексте упомянута какая-то из услуг — считаем намерением
+  const hist  = await getHistory(chatId);
+  const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
+  const topics = guessTopics(userText, lastA?.content || "");
+  return topics.length > 0;
+}
+
+// ==== Локализация ====
 const L = {
   hi: {
     ru: "Здравствуйте! Я ИИ-ассистент компании START. Чем могу помочь?",
@@ -427,6 +426,36 @@ const COMPANY_INFO = {
   phone: "+77776662115",
   worktime: "Пн–Пт, 10:00–18:00",
 };
+
+// ==== Служебки для лидов ====
+function buildAdminMsg({ topic, when, name, phone, chatId }) {
+  return (
+    `🆕 Новая заявка чатбота:\n` +
+    `Тема: ${topic || "-"}\n` +
+    `Время: ${when || "-"}\n` +
+    `Имя: ${name || "-"}\n` +
+    `Телефон: ${phone || "-"}\n` +
+    `Источник: tg chat_id ${chatId}`
+  );
+}
+async function sendLead(chatId, b, lang) {
+  const adminId = getAdminId();
+  const preReply = L.booked[lang] || L.booked.ru;
+
+  if (adminId) {
+    const msg = buildAdminMsg({ topic: b.topic, when: b.when, name: b.name, phone: b.phone, chatId });
+    const r = await sendTG(adminId, msg);
+    if (!r.ok) console.error("Failed to send lead to admin:", adminId);
+  } else {
+    console.error("ADMIN_CHAT_ID is not set or empty");
+  }
+
+  await setContact(chatId, { name: b.name, phone: b.phone });
+  await clearBooking(chatId);
+  await setLastLead(chatId, b);
+  await redis.del(PENDING_OFFER_KEY(chatId));
+  return preReply;
+}
 
 // ==== Базовый системный промпт (общий, язык подмешиваем ниже) ====
 const baseSystemPrompt = `
@@ -601,15 +630,15 @@ const baseSystemPrompt = `
 --- запуск франшизы и обработка первых обращений.
 = Конец списка услуг. =
 Правила:
-- Не используй в приветствии слова вроде "сегодня / today?".
+- Не используй в приветствии слова вроде "сегодня / today".
 - Уважай контекст последних сообщений (история диалога).
 - Если пользователю нужна консультация специалиста — собери: {тема, время, имя, телефон}. После сбора подтверди и передай специалисту.
-- Если пользователь уже согласился на консультацию после того, как ты упомянул конкретную услугу (например, сайт или ИИ-боты или пр.), не уточняй тему повторно. Используй эту услугу как topic.
-- Если пользователь уже отправил свои данные в чате, а после спрашивал про другие услуги и тоже нужна консультация, то не запрашивай его данные снова, а сразу передавай запрос специалисту.
+- Если пользователь уже согласился на консультацию после того, как ты упомянул конкретную услугу — не уточняй тему повторно. Используй эту услугу как topic.
+- Если пользователь уже отправил свои данные в чате, а после спрашивал про другие услуги и тоже нужна консультация — не проси данные повторно без необходимости.
 - Если вопрос о ценах или сроках — говори, что расчёт индивидуальный после консультации; не выдумывай суммы и сроки.
-- Адрес компании фиксированный: ${COMPANY_INFO.address}. Телефон: ${COMPANY_INFO.phone}. Рабочее время: ${COMPANY_INFO.worktime}. Используй только это, ничего не выдумывай.
+- Адрес компании фиксированный: ${COMPANY_INFO.address}. Телефон: ${COMPANY_INFO.phone}. Рабочее время: ${COMPANY_INFO.worktime}. Используй только это.
 - Ссылку на сайт strateg.kz давай по запросу или если логично по ходу беседы. Для уточнения услуг черпай информацию только оттуда.
-- Если вопрос вне тем бизнеса START — ответь нейтрально и предложи подключить менеджера или отправь ссылку на сайт.
+- Если вопрос вне тем компании START — ответь нейтрально и предложи подключить менеджера или отправь ссылку на сайт.
 `;
 
 // ==== Основной обработчик вебхука ====
@@ -642,25 +671,20 @@ export default async function handler(req, res) {
     const userText = (message.text || "").trim();
 
     // ===== Язык: авто-детект + ручная команда =====
-    // 1) /lang <code>
     if (/^\/lang\b/i.test(userText)) {
       const parts = userText.split(/\s+/);
       const code = (parts[1] || "").toLowerCase();
       if (code === "ru" || code === "kz" || code === "en") {
         await redis.set(LANG_KEY(chatId), code, { ex: 60 * 60 * 24 * 30 });
-        const msg = L.langSet(code);
-        await sendTG(chatId, msg);
-        res.statusCode = 200;
-        return res.end(JSON.stringify({ ok: true }));
+        await sendTG(chatId, L.langSet(code));
+        res.statusCode = 200; return res.end(JSON.stringify({ ok: true }));
       } else {
         const current = (await redis.get(LANG_KEY(chatId))) || detectLang(userText) || "ru";
         await sendTG(chatId, L.unknownLang[current] || L.unknownLang.ru);
-        res.statusCode = 200;
-        return res.end(JSON.stringify({ ok: true }));
+        res.statusCode = 200; return res.end(JSON.stringify({ ok: true }));
       }
     }
 
-    // 2) /reset — очистка истории/слотов/контакта
     if (userText === "/reset") {
       await redis.del(`hist:${chatId}`);
       await redis.del(`book:${chatId}`);
@@ -668,11 +692,10 @@ export default async function handler(req, res) {
       const langAfterReset = (await redis.get(LANG_KEY(chatId))) || "ru";
       await redis.set(LANG_KEY(chatId), langAfterReset, { ex: 60 * 60 * 24 * 30 });
       await sendTG(chatId, L.resetDone[langAfterReset] || L.resetDone.ru);
-      res.statusCode = 200;
-      return res.end(JSON.stringify({ ok: true }));
+      res.statusCode = 200; return res.end(JSON.stringify({ ok: true }));
     }
 
-    // 3) Вычисляем язык: приоритет сохранённого; переключаемся только при уверенном сигнале
+    // Вычисляем язык
     const stored = await redis.get(LANG_KEY(chatId));
     const guess  = confidentLangSwitch(userText);
     let lang = (stored || guess || "ru");
@@ -683,358 +706,235 @@ export default async function handler(req, res) {
 
     if (userText === "/whoami") {
       await sendTG(chatId, `chat.id: ${chatId}`);
-      res.statusCode = 200;
-      return res.end(JSON.stringify({ ok: true }));
+      res.statusCode = 200; return res.end(JSON.stringify({ ok: true }));
     }
-
     if (userText === "/pingadmin") {
       const adminId = getAdminId();
-      if (!adminId) {
-        await sendTG(chatId, "ADMIN_CHAT_ID не задан");
-      } else {
+      if (!adminId) await sendTG(chatId, "ADMIN_CHAT_ID не задан");
+      else {
         await sendTG(adminId, "✅ Тест: сообщение администратору из бота");
         await sendTG(chatId, `Отправил тест админу: ${adminId}`);
       }
-      res.statusCode = 200;
-      return res.end(JSON.stringify({ ok: true }));
+      res.statusCode = 200; return res.end(JSON.stringify({ ok: true }));
     }
 
-    // ===== START RECORD SLOTS - Слоты записи =====
-
+    // ===== START RECORD SLOTS =====
     const booking = await getBooking(chatId);
     let handled = false;
     let preReply = null;
 
-    // --- Оппортунистически подберём любые поля из этого сообщения ---
+    // 0) Оппортунистически подберём любые поля из этого сообщения
     await tryAutofillFrom(chatId, booking, userText);
-    
-    // Если слота ещё нет — поставим правильный стартовый
-    if (!booking.stage) {
-      booking.stage = decideNextStage(booking) || null;
-      await setBooking(chatId, booking);
-    }
-    
-    // Если вдруг уже всё собрано — шлём лид и выходим
-    if (hasAllBookingFields(booking)) {
-      preReply = L.booked[lang] || L.booked.ru;
-    
-      const adminId = getAdminId();
-      if (adminId) {
-        const adminMsg =
-          `🆕 Новая заявка чатбота:\n` +
-          `Тема: ${booking.topic}\n` +
-          `Время: ${booking.when}\n` +
-          `Имя: ${booking.name}\n` +
-          `Телефон: ${booking.phone}\n` +
-          `Источник: tg chat_id ${chatId}`;
-        await sendTG(adminId, adminMsg);
-      }
-    
-      await setContact(chatId, { name: booking.name, phone: booking.phone });
-      await clearBooking(chatId);
-    
-      // завершение ответа пользователю
-      await pushHistory(chatId, "user", userText);
-      await pushHistory(chatId, "assistant", preReply);
-      await sendTG(chatId, preReply);
-      res.statusCode = 200;
-      return res.end(JSON.stringify({ ok: true }));
-    }
-    
-    // === AGGREGATED ONE-SHOT: собрать лид из последних реплик (тема/время/имя/телефон могли прийти по очереди)
-    if (!booking.stage) {
-      const hist  = await getHistory(chatId);
-      const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
-      const agg   = collectLeadFromRecent(hist, userText, lastA?.content || "");
-      if (agg && agg.phone) {
-        preReply = L.booked[lang] || L.booked.en;
 
-        const adminId = getAdminId();
-        if (adminId) {
-          const adminMsg =
-            `🆕 Новая заявка чатбота:\n` +
-            `Тема: ${agg.topic}\n` +
-            `Время: ${agg.when}\n` +
-            `Имя: ${agg.name}\n` +
-            `Телефон: ${agg.phone}\n` +
-            `Источник: tg chat_id ${chatId}`;
-          const r = await sendTG(adminId, adminMsg);
-          if (!r.ok) console.error("Failed to send aggregated lead:", adminId);
-        } else {
-          console.error("ADMIN_CHAT_ID is not set or empty");
-        }
-
-        await setContact(chatId, { name: agg.name !== "-" ? agg.name : undefined, phone: agg.phone });
-        await clearBooking(chatId);
+    // 0.1) Обработка ожидаемого «оффера на доп.заявку»
+    const pendingOffer = safeParseItem(await redis.get(PENDING_OFFER_KEY(chatId)));
+    if (pendingOffer && typeof userText === "string") {
+      const yes = /\b(да|иә|yes|ага|ок|давай|хотим|нужно|оформи|оформить)\b/i.test(userText);
+      const no  = /\b(нет|жоқ|no|не надо|потом|не сейчас)\b/i.test(userText);
+      if (yes) {
+        const lead = {
+          topic: pendingOffer.topic,
+          when:  pendingOffer.when || booking.when || "-",
+          name:  booking.name || (await getContact(chatId))?.name || "-",
+          phone: booking.phone || (await getContact(chatId))?.phone || "-"
+        };
+        preReply = await sendLead(chatId, lead, lang);
+        handled  = true;
+      } else if (no) {
+        await redis.del(PENDING_OFFER_KEY(chatId));
+        preReply = (lang === "kz") ? "Түсіндім. Басқа сұрақтарыңыз болса — жауап беремін."
+              : (lang === "en") ? "Got it. Happy to answer any other questions."
+              : "Понял. Если будут ещё вопросы — с радостью отвечу.";
         handled = true;
       }
     }
 
-    // === REUSE CONTACT: есть сохранённый контакт -> новая услуга без телефона 
-if (!handled) { 
-  const contact = await getContact(chatId); 
-  if (!booking.stage && contact?.phone && !hasPhone(userText)) { 
-    const hist  = await getHistory(chatId); 
-    const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
+    // 0.2) Антидубликат/тема сейчас
+    const lastLead = await getLastLead(chatId);
+    const histForTopic  = await getHistory(chatId);
+    const lastAForTopic = histForTopic.filter(h => h.role === "assistant").slice(-1)[0];
+    const bundleForTopic = buildRecentUserBundle(histForTopic, userText, 4);
+    const topicsNow = Array.from(new Set([
+      ...guessTopics(userText, lastAForTopic?.content || ""),
+      ...guessTopics(bundleForTopic, lastAForTopic?.content || "")
+    ]));
+    const primaryTopicNow = topicsNow.length ? topicsNow.join(", ") : null;
+    const duplicateTopic = !!(lastLead && primaryTopicNow && topicsSimilar(primaryTopicNow, lastLead.topic) && withinCooldown(lastLead.ts));
 
-    // берём время из текущего текста или из «бандла»
-    const bundle = buildRecentUserBundle(hist, userText, 4);
-    const whenHit = extractWhen(userText) || extractWhen(bundle) || (lastA?.content ? extractWhen(lastA.content) : null);
-    const when = whenHit ? _cleanTail(whenHit) : "-";
+    // 1) REUSE CONTACT: прежний контакт есть, телефона в тексте нет, тема есть
+    if (!handled) {
+      const contact = await getContact(chatId);
+      if (!booking.stage && contact?.phone && !hasPhone(userText)) {
+        const hist  = await getHistory(chatId);
+        const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
+        const bundle = buildRecentUserBundle(hist, userText, 4);
 
-    // ТЕМЫ: объединяем найденное в текущем сообщении + в бандле + из последнего ответа ассистента
-    const fromMsg    = guessTopics(userText, lastA?.content || "");
-    const fromBundle = guessTopics(bundle,    lastA?.content || "");
-    const topicsArr  = Array.from(new Set([...fromMsg, ...fromBundle]));
-    const topicFromMsg = topicsArr.length ? topicsArr.join(", ") : "Консультация";
+        const whenHit = extractWhen(userText) || extractWhen(bundle) || (lastA?.content ? extractWhen(lastA.content) : null);
+        const when = whenHit ? _cleanTail(whenHit) : "-";
 
-    if (topicFromMsg && topicFromMsg !== "Консультация") {
-      preReply = L.booked[lang] || L.booked.ru;
+        const fromMsg    = guessTopics(userText, lastA?.content || "");
+        const fromBundle = guessTopics(bundle,    lastA?.content || "");
+        const topicsArr  = Array.from(new Set([...fromMsg, ...fromBundle]));
+        const topicFromMsg = topicsArr.length ? topicsArr.join(", ") : "Консультация";
 
-      const adminId = getAdminId();
-      if (adminId) {
-        const adminMsg =
-          `🆕 Новая заявка чатбота:\n` +
-          `Тема: ${topicFromMsg}\n` +
-          `Время: ${when}\n` +
-          `Имя: ${contact.name || "-"}\n` +
-          `Телефон: ${contact.phone || "-"}\n` +
-          `Источник: tg chat_id ${chatId}`;
-        const r = await sendTG(adminId, adminMsg);
-        if (!r.ok) console.error("Failed to send reused-contact lead:", adminId);
-      } else {
-        console.error("ADMIN_CHAT_ID is not set or empty");
-      }
-
-      handled = true;
-    }
-  }
-}
-    // === END REUSE CONTACT ===
-    
-    const bookTrigger = /консультац|запис|менеджер|оператор|поговор|қабылда|кеңес|consult|booking/i;
-    
-    // === ONE-SHOT: в одном сообщении есть телефон ===
-if (!handled && !booking.stage && hasPhone(userText)) {
-  const phone  = pickPhone(userText);
-  const hist   = await getHistory(chatId);
-  const lastA  = hist.filter(h => h.role === "assistant").slice(-1)[0];
-
-  // ТЕМЫ: объединяем userText + bundle + lastAssistant; удаляем дубликаты
-  const bundle   = buildRecentUserBundle(hist, userText, 4);
-  const fromMsg  = guessTopics(userText, lastA?.content || "");
-  const fromBund = guessTopics(bundle,   lastA?.content || "");
-  const topicsArr = Array.from(new Set([...fromMsg, ...fromBund]));
-  const topic = topicsArr.length ? topicsArr.join(", ") : "Консультация";
-
-  // ВРЕМЯ: из этого сообщения, или из бандла, или из последнего ответа ассистента
-  let whenHit = extractWhen(userText) || extractWhen(bundle) || (lastA?.content ? extractWhen(lastA.content) : null);
-  const when = whenHit ? _cleanTail(whenHit) : "-";
-
-  // ИМЯ
-  const name = extractName(userText) || "-";
-
-  // ответ пользователю (на текущем языке)
-  preReply = L.booked[lang] || L.booked.ru;
-
-  // лид админу
-  const adminId = getAdminId();
-  if (adminId) {
-    const adminMsg =
-      `🆕 Новая заявка чатбота:\n` +
-      `Тема: ${topic}\n` +
-      `Время: ${when}\n` +
-      `Имя: ${name}\n` +
-      `Телефон: ${phone}\n` +
-      `Источник: tg chat_id ${chatId}`;
-    const r = await sendTG(adminId, adminMsg);
-    if (!r.ok) console.error("Failed to send one-shot lead:", adminId);
-  } else {
-    console.error("ADMIN_CHAT_ID is not set or empty");
-  }
-
-  await setContact(chatId, { name, phone });
-  await clearBooking(chatId);
-  handled = true;
-}
-    // === END ONE-SHOT ===
-    
-    // === Обычный запуск слотов по ключевым словам
-    if (!handled && !booking.stage && bookTrigger.test(userText)) {
-      const hist  = await getHistory(chatId);
-      const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
-      let autoTopic = null;
-      if (lastA && typeof lastA.content === "string") {
-        const txt = lastA.content.toLowerCase();
-        if (/ии|чат.?бот|ai.?bot|жасанды интеллект/.test(txt)) autoTopic = "ИИ-чатботы";
-        else if (/сайт|лендинг|landing|web\s*site/.test(txt)) autoTopic = "Разработка сайта";
-        else if (/маркетинг|реклама|таргет|instagram|google\s*ads/.test(txt)) autoTopic = "Маркетинг/реклама";
-        else if (/бизнес[-\s]?процесс|автоматизац/.test(txt)) autoTopic = "Бизнес-процессы/автоматизация";
-      }
-      booking.topic = autoTopic || "Консультация";
-      booking.stage = "when";
-      await setBooking(chatId, booking);
-      preReply = L.askWhen[lang] || L.askWhen.en;
-      handled = true;
-    }
-    else if (!handled && booking.stage === "topic" && userText.length > 1) {
-      booking.topic = userText;
-      booking.stage = "when";
-      await setBooking(chatId, booking);
-      preReply = L.askWhen[lang] || L.askWhen.en;
-      handled = true;
-    }
-
-    else if (!handled && booking.stage === "when") {
-      // сначала попробуем подхватить всё, что пришло «не по порядку»
-      await tryAutofillFrom(chatId, booking, userText);
-    
-      if (booking.when) {
-        booking.stage = decideNextStage(booking) || null;
-        await setBooking(chatId, booking);
-    
-        if (!booking.stage) {
-          // всё собрано
-          preReply = L.booked[lang] || L.booked.ru;
-          const adminId = getAdminId();
-          if (adminId) {
-            const adminMsg =
-              `🆕 Новая заявка чатбота:\n` +
-              `Тема: ${booking.topic}\n` +
-              `Время: ${booking.when}\n` +
-              `Имя: ${booking.name}\n` +
-              `Телефон: ${booking.phone}\n` +
-              `Источник: tg chat_id ${chatId}`;
-            await sendTG(adminId, adminMsg);
+        if (topicFromMsg && topicFromMsg !== "Консультация") {
+          if (duplicateTopic && topicsSimilar(topicFromMsg, lastLead.topic)) {
+            // по той же теме недавно — не шлём лид, перейдём к обычному ИИ-ответу
+          } else {
+            const b = { topic: topicFromMsg, when, name: contact.name || "-", phone: contact.phone || "-" };
+            preReply = await sendLead(chatId, b, lang);
+            handled = true;
           }
-          await setContact(chatId, { name: booking.name, phone: booking.phone });
-          await clearBooking(chatId);
-        } else if (booking.stage === "name") {
-          preReply = L.askName[lang] || L.askName.en;
-        } else if (booking.stage === "phone") {
-          preReply = L.askPhone[lang] || L.askPhone.en;
+        }
+      }
+    }
+
+    // 2) ONE-SHOT: в одном сообщении есть телефон
+    if (!handled && !booking.stage && hasPhone(userText)) {
+      const phone  = pickPhone(userText);
+      const hist   = await getHistory(chatId);
+      const lastA  = hist.filter(h => h.role === "assistant").slice(-1)[0];
+
+      const bundle   = buildRecentUserBundle(hist, userText, 4);
+      const fromMsg  = guessTopics(userText, lastA?.content || "");
+      const fromBund = guessTopics(bundle,   lastA?.content || "");
+      const topicsArr = Array.from(new Set([...fromMsg, ...fromBund]));
+      const topic = topicsArr.length ? topicsArr.join(", ") : "Консультация";
+
+      const whenHit = extractWhen(userText) || extractWhen(bundle) || (lastA?.content ? extractWhen(lastA.content) : null);
+      const when = whenHit ? _cleanTail(whenHit) : "-";
+
+      const name = extractName(userText) || "-";
+
+      const b = { topic, when, name, phone };
+      if (duplicateTopic && lastLead && topicsSimilar(topic, lastLead.topic)) {
+        // та же тема недавно — не дублируем
+      } else {
+        preReply = await sendLead(chatId, b, lang);
+        await setContact(chatId, { name, phone });
+        handled = true;
+      }
+    }
+
+    // 3) Слоты — запускаем ТОЛЬКО при намерении или если уже находимся в процессе
+    const canStart = (!booking.stage) ? await shouldStartBooking(userText, chatId) : true;
+
+    if (!handled && canStart) {
+      // если слота ещё нет — выставим стартовый на основании того, чего не хватает
+      if (!booking.stage) {
+        booking.stage = decideNextStage(booking) || "when";
+        await setBooking(chatId, booking);
+      }
+
+      // === stage: topic (редкий случай, если решишь использовать)
+      if (!handled && booking.stage === "topic" && userText.length > 1) {
+        booking.topic = userText;
+        booking.stage = "when";
+        await setBooking(chatId, booking);
+        preReply = L.askWhen[lang] || L.askWhen.en;
+        handled = true;
+      }
+
+      // === stage: when
+      else if (!handled && booking.stage === "when") {
+        await tryAutofillFrom(chatId, booking, userText);
+
+        if (booking.when) {
+          const same = (lastLead && topicsSimilar(booking.topic || "", lastLead.topic || "") && withinCooldown(lastLead.ts));
+          booking.stage = decideNextStage(booking) || null;
+          await setBooking(chatId, booking);
+
+          if (!booking.stage) {
+            if (same) {
+              preReply = (lang === "kz") ? "Алдыңғы өтінім жіберілді. Қосымша сұрақтарыңыз болса — жауап беремін."
+                    : (lang === "en") ? "Your previous request has been sent. Happy to answer more questions."
+                    : "Предыдущая заявка уже передана менеджеру. Готов ответить на дополнительные вопросы.";
+            } else {
+              preReply = await sendLead(chatId, booking, lang);
+            }
+          } else if (booking.stage === "name") {
+            preReply = L.askName[lang] || L.askName.en;
+          } else if (booking.stage === "phone") {
+            preReply = L.askPhone[lang] || L.askPhone.en;
+          } else {
+            preReply = L.askWhen[lang] || L.askWhen.en;
+          }
         } else {
-          // на всякий
           preReply = L.askWhen[lang] || L.askWhen.en;
         }
-      } else {
-        // времени всё ещё нет
-        preReply = L.askWhen[lang] || L.askWhen.en;
-      }
-      handled = true;
-    }
-    
-    else if (!handled && booking.stage === "name") {
-      // сначала пробуем дозаполнить всё, что можно
-      await tryAutofillFrom(chatId, booking, userText);
-    
-      if (hasAllBookingFields(booking)) {
-        // все данные уже есть -> сразу отправляем лид
-        preReply = L.booked[lang] || L.booked.ru;
-        const adminId = getAdminId();
-        if (adminId) {
-          const adminMsg =
-            `🆕 Новая заявка чатбота:\n` +
-            `Тема: ${booking.topic}\n` +
-            `Время: ${booking.when}\n` +
-            `Имя: ${booking.name}\n` +
-            `Телефон: ${booking.phone}\n` +
-            `Источник: tg chat_id ${chatId}`;
-          await sendTG(adminId, adminMsg);
-        }
-        await setContact(chatId, { name: booking.name, phone: booking.phone });
-        await clearBooking(chatId);
-      } else if (booking.name) {
-        // имя уже подхватилось — идём к следующему слоту
-        booking.stage = decideNextStage(booking) || "phone";
-        await setBooking(chatId, booking);
-        preReply = L.askPhone[lang] || L.askPhone.en;
-      } else {
-        // имя так и не нашли
-        preReply = (lang === "kz")
-          ? "Есім тек мәтін түрінде керек (цифрларсыз). Қалай жазылады?"
-          : (lang === "en")
-            ? "Please send just your name (letters only)."
-            : "Пожалуйста, укажите только имя (без цифр). Как к вам обращаться?";
-      }
-    
-      handled = true;
-    }
-
-    else if (!handled && booking.stage === "phone") {
-      // 1) всегда пытаемся автодозаполнить поля из контекста
-      await tryAutofillFrom(chatId, booking, userText);
-    
-      // 2) если после автозаполнения всё есть — сразу отправляем лид
-      if (hasAllBookingFields(booking)) {
-        preReply = L.booked[lang] || L.booked.ru;
-    
-        const adminId = getAdminId();
-        if (adminId) {
-          const adminMsg =
-            `🆕 Новая заявка чатбота:\n` +
-            `Тема: ${booking.topic}\n` +
-            `Время: ${booking.when}\n` +
-            `Имя: ${booking.name}\n` +
-            `Телефон: ${booking.phone}\n` +
-            `Источник: tg chat_id ${chatId}`;
-          const r = await sendTG(adminId, adminMsg);
-          if (!r.ok) console.error("Failed to send lead:", adminId);
-        } else {
-          console.error("ADMIN_CHAT_ID is not set or empty");
-        }
-    
-        await setContact(chatId, { name: booking.name, phone: booking.phone });
-        await clearBooking(chatId);
         handled = true;
-      } else if (phoneOk(userText)) {
-        // 3) пользователь прислал номер — фиксируем и решаем, что спросить дальше
-        booking.phone = pickPhone(userText) || userText;
-        // вдруг вместе с телефоном пришло что-то ещё
+      }
+
+      // === stage: name
+      else if (!handled && booking.stage === "name") {
         await tryAutofillFrom(chatId, booking, userText);
-        await setBooking(chatId, booking);
-    
-        const next = decideNextStage(booking);
-        if (!next) {
-          // всё собрано — отправляем лид
-          preReply = L.booked[lang] || L.booked.ru;
-    
-          const adminId = getAdminId();
-          if (adminId) {
-            const adminMsg =
-              `🆕 Новая заявка чатбота:\n` +
-              `Тема: ${booking.topic}\n` +
-              `Время: ${booking.when}\n` +
-              `Имя: ${booking.name}\n` +
-              `Телефон: ${booking.phone}\n` +
-              `Источник: tg chat_id ${chatId}`;
-            const r = await sendTG(adminId, adminMsg);
-            if (!r.ok) console.error("Failed to send lead:", adminId);
-          } else {
-            console.error("ADMIN_CHAT_ID is not set or empty");
-          }
-    
-          await setContact(chatId, { name: booking.name, phone: booking.phone });
-          await clearBooking(chatId);
+
+        if (hasAllBookingFields(booking)) {
+          const same = (lastLead && topicsSimilar(booking.topic || "", lastLead.topic || "") && withinCooldown(lastLead.ts));
+          preReply = same
+            ? ((lang === "kz") ? "Алдыңғы өтінім жіберілді. Қосымша сұрақтарыңыз болса — жауап беремін."
+              : (lang === "en") ? "Your previous request has been sent. Happy to answer more questions."
+              : "Предыдущая заявка уже передана менеджеру. Готов ответить на дополнительные вопросы.")
+            : await sendLead(chatId, booking, lang);
+          handled = true;
+        } else if (booking.name) {
+          booking.stage = decideNextStage(booking) || "phone";
+          await setBooking(chatId, booking);
+          preReply = L.askPhone[lang] || L.askPhone.en;
+          handled = true;
         } else {
-          // чего-то не хватает — спрашиваем ДОточно следующий слот
-          if (next === "when")      preReply = L.askWhen[lang] || L.askWhen.en;
-          else if (next === "name") preReply = L.askName[lang] || L.askName.en;
-          else                      preReply = L.askPhone[lang] || L.askPhone.en;
+          preReply = (lang === "kz")
+            ? "Есім тек мәтін түрінде керек (цифрларсыз). Қалай жазылады?"
+            : (lang === "en")
+              ? "Please send just your name (letters only)."
+              : "Пожалуйста, укажите только имя (без цифр). Как к вам обращаться?";
+          handled = true;
         }
-        handled = true;
-      } else {
-        // 4) номера нет и автозаполнение не помогло — просим номер
-        preReply = (lang === "kz")
-          ? "Телефон нөмірін жіберіңіз (мүмкін +7 / бос орындармен)."
-          : (lang === "en")
-            ? "Please send a phone number (you can include +7 / spaces)."
-            : "Пожалуйста, отправьте номер телефона (можно с +7 / пробелами).";
-        handled = true;
+      }
+
+      // === stage: phone
+      else if (!handled && booking.stage === "phone") {
+        await tryAutofillFrom(chatId, booking, userText);
+
+        if (hasAllBookingFields(booking)) {
+          const same = (lastLead && topicsSimilar(booking.topic || "", lastLead.topic || "") && withinCooldown(lastLead.ts));
+          preReply = same
+            ? ((lang === "kz") ? "Алдыңғы өтінім жіберілді. Қосымша сұрақтарыңыз болса — жауап беремін."
+              : (lang === "en") ? "Your previous request has been sent. Happy to answer more questions."
+              : "Предыдущая заявка уже передана менеджеру. Готов ответить на дополнительные вопросы.")
+            : await sendLead(chatId, booking, lang);
+          handled = true;
+        } else if (phoneOk(userText)) {
+          booking.phone = pickPhone(userText) || userText;
+          await tryAutofillFrom(chatId, booking, userText);
+          await setBooking(chatId, booking);
+
+          const next = decideNextStage(booking);
+          if (!next) {
+            const same = (lastLead && topicsSimilar(booking.topic || "", lastLead.topic || "") && withinCooldown(lastLead.ts));
+            preReply = same
+              ? ((lang === "kz") ? "Алдыңғы өтінім жіберілді. Қосымша сұрақтарыңыз болса — жауап беремін."
+                : (lang === "en") ? "Your previous request has been sent. Happy to answer more questions."
+                : "Предыдущая заявка уже передана менеджеру. Готов ответить на дополнительные вопросы.")
+              : await sendLead(chatId, booking, lang);
+          } else {
+            if (next === "when")      preReply = L.askWhen[lang] || L.askWhen.en;
+            else if (next === "name") preReply = L.askName[lang] || L.askName.en;
+            else                      preReply = L.askPhone[lang] || L.askPhone.en;
+          }
+          handled = true;
+        } else {
+          preReply = (lang === "kz")
+            ? "Телефон нөмірін жіберіңіз (мүмкін +7 / бос орындармен)."
+            : (lang === "en")
+              ? "Please send a phone number (you can include +7 / spaces)."
+              : "Пожалуйста, отправьте номер телефона (можно с +7 / пробелами).";
+          handled = true;
+        }
       }
     }
-    // ==== END RECORD SLOTS ====
 
+    // Если уже всё сделали в слотах — отправим и выйдем
     if (handled && preReply) {
       await pushHistory(chatId, "user", userText);
       await pushHistory(chatId, "assistant", preReply);
@@ -1043,16 +943,29 @@ if (!handled && !booking.stage && hasPhone(userText)) {
       return res.end(JSON.stringify({ ok: true }));
     }
 
+    // --- Если есть недавний лид, и сейчас всплыла новая тема — сохраним «оффер» ---
+    if (!handled && lastLead && primaryTopicNow && !topicsSimilar(primaryTopicNow, lastLead.topic)) {
+      const offerPayload = {
+        topic: primaryTopicNow,
+        when:  extractWhen(userText) || (await getBooking(chatId))?.when || "-"
+      };
+      await redis.set(PENDING_OFFER_KEY(chatId), JSON.stringify(offerPayload), { ex: 60 * 30 }); // 30 минут
+    }
+
     // ===== Обычный ИИ-ответ с историей, на нужном языке =====
     const history = await getHistory(chatId);
-    const languageLine = lang === "ru"
-      ? "Отвечай на русском языке."
-      : lang === "kz"
-      ? "Жауапты қазақ тілінде бер."
-      : "Reply in English.";
+    const languageLine = lang === "ru" ? "Отвечай на русском языке."
+                      : lang === "kz" ? "Жауапты қазақ тілінде бер."
+                      : "Reply in English.";
 
-    const systemPrompt = baseSystemPrompt + "\n" + languageLine;
+    let extraPolicy = "";
+    if (lastLead) {
+      extraPolicy += `
+- Если недавно уже была передана заявка и текущий вопрос по той же теме — не предлагай новую заявку, просто консультируй.
+- Если видишь НОВУЮ тему (другую, чем в последней заявке), сначала ответь по сути, затем одной короткой строкой уточни: «Оформить отдельную заявку по теме: "<тема>"?» и жди явного согласия.`;
+    }
 
+    const systemPrompt = baseSystemPrompt + "\n" + languageLine + "\n" + extraPolicy;
     const maybeHi = history.length === 0 ? (L.hi[lang] || L.hi.ru) : null;
 
     const messages = [
@@ -1090,10 +1003,9 @@ if (!handled && !booking.stage && hasPhone(userText)) {
 
 // ==== Отправка сообщения в Telegram ====
 function getAdminId() {
-  const raw = (process.env.ADMIN_CHAT_ID || "").replace(/^[\'"]|[\'"]$/g, "");
+  const raw = (process.env.ADMIN_CHAT_ID || "").trim().replace(/^[\'"]|[\'"]$/g, "");
   return raw;
 }
-
 async function sendTG(chatId, text) {
   const resp = await fetch(
     `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,

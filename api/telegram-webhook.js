@@ -234,6 +234,63 @@ function extractWhen(t) {
   return null;
 }
 
+// ВСПОМОГАЛКИ (рядом с другими хелперами)
+// Все поля действительно собраны?
+function hasAllBookingFields(b) {
+  return !!(
+    b &&
+    b.topic && b.topic !== "Консультация" &&
+    b.when  && b.when  !== "-" &&
+    b.name  && b.name  !== "-" &&
+    b.phone && b.phone !== "-"
+  );
+}
+
+// Что спрашиваем дальше? (тему не форсируем — пытаемся вывести сами)
+function decideNextStage(b) {
+  if (!b.when  || b.when  === "-") return "when";
+  if (!b.name  || b.name  === "-") return "name";
+  if (!b.phone || b.phone === "-") return "phone";
+  return null; // всё собрано
+}
+
+// Универсальная автоподстановка из текущего текста + бандла + последнего ответа ассистента
+async function tryAutofillFrom(chatId, booking, userText) {
+  const hist   = await getHistory(chatId);
+  const lastA  = hist.filter(h => h.role === "assistant").slice(-1)[0];
+  const bundle = buildRecentUserBundle(hist, userText, 4);
+
+  // WHEN
+  if (!booking.when || booking.when === "-") {
+    const w = extractWhen(userText) ||
+              extractWhen(bundle)   ||
+              (lastA?.content ? extractWhen(lastA.content) : null);
+    if (w) booking.when = _cleanTail(w);
+  }
+
+  // NAME
+  if (!booking.name || booking.name === "-") {
+    const n = extractName(userText) || extractName(bundle);
+    if (n && isNameLike(n)) booking.name = n;
+  }
+
+  // PHONE
+  if (!booking.phone || booking.phone === "-") {
+    const p = pickPhone(userText) || pickPhone(bundle);
+    if (p && phoneOk(p)) booking.phone = p;
+  }
+
+  // TOPIC (сливаем из userText + bundle + последнего ответа ассистента)
+  if (!booking.topic || booking.topic === "Консультация") {
+    const fromMsg    = guessTopics(userText, lastA?.content || "");
+    const fromBundle = guessTopics(bundle,    lastA?.content || "");
+    const topicsArr  = Array.from(new Set([...fromMsg, ...fromBundle]));
+    if (topicsArr.length) booking.topic = topicsArr.join(", ");
+  }
+
+  return booking;
+}
+
 // ==== TOPICS: покрываем темами все услуги из списка ====
 const TOPIC_PATTERNS = [
   { re: /(масштаб|growth|scale|стратегия\s*развития|развитие бренда|позиционир(ование)?)/i, topic: "Масштабирование и стратегия развития" },
@@ -648,6 +705,42 @@ export default async function handler(req, res) {
     let handled = false;
     let preReply = null;
 
+    // --- Оппортунистически подберём любые поля из этого сообщения ---
+    await tryAutofillFrom(chatId, booking, userText);
+    
+    // Если слота ещё нет — поставим правильный стартовый
+    if (!booking.stage) {
+      booking.stage = decideNextStage(booking) || null;
+      await setBooking(chatId, booking);
+    }
+    
+    // Если вдруг уже всё собрано — шлём лид и выходим
+    if (hasAllBookingFields(booking)) {
+      preReply = L.booked[lang] || L.booked.ru;
+    
+      const adminId = getAdminId();
+      if (adminId) {
+        const adminMsg =
+          `🆕 Новая заявка чатбота:\n` +
+          `Тема: ${booking.topic}\n` +
+          `Время: ${booking.when}\n` +
+          `Имя: ${booking.name}\n` +
+          `Телефон: ${booking.phone}\n` +
+          `Источник: tg chat_id ${chatId}`;
+        await sendTG(adminId, adminMsg);
+      }
+    
+      await setContact(chatId, { name: booking.name, phone: booking.phone });
+      await clearBooking(chatId);
+    
+      // завершение ответа пользователю
+      await pushHistory(chatId, "user", userText);
+      await pushHistory(chatId, "assistant", preReply);
+      await sendTG(chatId, preReply);
+      res.statusCode = 200;
+      return res.end(JSON.stringify({ ok: true }));
+    }
+    
     // === AGGREGATED ONE-SHOT: собрать лид из последних реплик (тема/время/имя/телефон могли прийти по очереди)
     if (!booking.stage) {
       const hist  = await getHistory(chatId);
@@ -791,88 +884,154 @@ if (!handled && !booking.stage && hasPhone(userText)) {
       preReply = L.askWhen[lang] || L.askWhen.en;
       handled = true;
     }
+
     else if (!handled && booking.stage === "when") {
-      // сперва пытаемся вытащить из текущего сообщения
-      let whenHit = extractWhen(userText);
-
-      // если не нашли — пробуем из последних 3–4 пользовательских фраз + текущей
-      if (!whenHit) {
-        const hist = await getHistory(chatId);
-        const bundle = buildRecentUserBundle(hist, userText, 4);
-        whenHit = extractWhen(bundle);
-      }
-
-      if (whenHit) {
-        booking.when = _cleanTail(whenHit);
-        booking.stage = "name";
+      // сначала попробуем подхватить всё, что пришло «не по порядку»
+      await tryAutofillFrom(chatId, booking, userText);
+    
+      if (booking.when) {
+        booking.stage = decideNextStage(booking) || null;
         await setBooking(chatId, booking);
-        preReply = L.askName[lang] || L.askName.en;
+    
+        if (!booking.stage) {
+          // всё собрано
+          preReply = L.booked[lang] || L.booked.ru;
+          const adminId = getAdminId();
+          if (adminId) {
+            const adminMsg =
+              `🆕 Новая заявка чатбота:\n` +
+              `Тема: ${booking.topic}\n` +
+              `Время: ${booking.when}\n` +
+              `Имя: ${booking.name}\n` +
+              `Телефон: ${booking.phone}\n` +
+              `Источник: tg chat_id ${chatId}`;
+            await sendTG(adminId, adminMsg);
+          }
+          await setContact(chatId, { name: booking.name, phone: booking.phone });
+          await clearBooking(chatId);
+        } else if (booking.stage === "name") {
+          preReply = L.askName[lang] || L.askName.en;
+        } else if (booking.stage === "phone") {
+          preReply = L.askPhone[lang] || L.askPhone.en;
+        } else {
+          // на всякий
+          preReply = L.askWhen[lang] || L.askWhen.en;
+        }
       } else {
+        // времени всё ещё нет
         preReply = L.askWhen[lang] || L.askWhen.en;
       }
       handled = true;
     }
-      
+    
     else if (!handled && booking.stage === "name") {
-      if (isNameLike(userText)) {
-        booking.name = userText;
-        booking.stage = "phone";
+      // сначала пробуем дозаполнить всё, что можно
+      await tryAutofillFrom(chatId, booking, userText);
+    
+      if (hasAllBookingFields(booking)) {
+        // все данные уже есть -> сразу отправляем лид
+        preReply = L.booked[lang] || L.booked.ru;
+        const adminId = getAdminId();
+        if (adminId) {
+          const adminMsg =
+            `🆕 Новая заявка чатбота:\n` +
+            `Тема: ${booking.topic}\n` +
+            `Время: ${booking.when}\n` +
+            `Имя: ${booking.name}\n` +
+            `Телефон: ${booking.phone}\n` +
+            `Источник: tg chat_id ${chatId}`;
+          await sendTG(adminId, adminMsg);
+        }
+        await setContact(chatId, { name: booking.name, phone: booking.phone });
+        await clearBooking(chatId);
+      } else if (booking.name) {
+        // имя уже подхватилось — идём к следующему слоту
+        booking.stage = decideNextStage(booking) || "phone";
         await setBooking(chatId, booking);
         preReply = L.askPhone[lang] || L.askPhone.en;
       } else {
+        // имя так и не нашли
         preReply = (lang === "kz")
           ? "Есім тек мәтін түрінде керек (цифрларсыз). Қалай жазылады?"
           : (lang === "en")
             ? "Please send just your name (letters only)."
             : "Пожалуйста, укажите только имя (без цифр). Как к вам обращаться?";
       }
+    
       handled = true;
     }
 
     else if (!handled && booking.stage === "phone") {
-      if (phoneOk(userText)) {
-        booking.phone = userText;
-        // Подстраховка: если не поймали when/name/topic — собираем из последних реплик
-        const hist  = await getHistory(chatId);
-        const lastA = hist.filter(h => h.role === "assistant").slice(-1)[0];
-        // 2.1 — время: если пусто/прочерк — вытягиваем из бандла
-        if (!booking.when || booking.when === "-") {
-          const bundle = buildRecentUserBundle(hist, userText, 4);
-          const aggWhen = extractWhen(userText) || extractWhen(bundle) || (lastA?.content ? extractWhen(lastA.content) : null);
-          if (aggWhen) booking.when = _cleanTail(aggWhen);
-        }
-        // 2.2 — имя/тема: как и раньше
-        if (!booking.name) {
-          const agg = collectLeadFromRecent(hist, userText, lastA?.content || "");
-          booking.name  = booking.name  || (agg?.name  || "-");
-          booking.topic = booking.topic || (agg?.topic || "Консультация");
-        }
-        preReply = L.booked[lang] || L.booked.ru; // подстраховка на RU
-        // Отправляем админу
+      // 1) всегда пытаемся автодозаполнить поля из контекста
+      await tryAutofillFrom(chatId, booking, userText);
+    
+      // 2) если после автозаполнения всё есть — сразу отправляем лид
+      if (hasAllBookingFields(booking)) {
+        preReply = L.booked[lang] || L.booked.ru;
+    
         const adminId = getAdminId();
         if (adminId) {
           const adminMsg =
             `🆕 Новая заявка чатбота:\n` +
-            `Тема: ${booking.topic || "-"}\n` +
-            `Время: ${booking.when || "-"}\n` +
-            `Имя: ${booking.name || "-"}\n` +
-            `Телефон: ${booking.phone || "-"}\n` +
+            `Тема: ${booking.topic}\n` +
+            `Время: ${booking.when}\n` +
+            `Имя: ${booking.name}\n` +
+            `Телефон: ${booking.phone}\n` +
             `Источник: tg chat_id ${chatId}`;
           const r = await sendTG(adminId, adminMsg);
           if (!r.ok) console.error("Failed to send lead:", adminId);
         } else {
           console.error("ADMIN_CHAT_ID is not set or empty");
         }
+    
         await setContact(chatId, { name: booking.name, phone: booking.phone });
         await clearBooking(chatId);
+        handled = true;
+      } else if (phoneOk(userText)) {
+        // 3) пользователь прислал номер — фиксируем и решаем, что спросить дальше
+        booking.phone = pickPhone(userText) || userText;
+        // вдруг вместе с телефоном пришло что-то ещё
+        await tryAutofillFrom(chatId, booking, userText);
+        await setBooking(chatId, booking);
+    
+        const next = decideNextStage(booking);
+        if (!next) {
+          // всё собрано — отправляем лид
+          preReply = L.booked[lang] || L.booked.ru;
+    
+          const adminId = getAdminId();
+          if (adminId) {
+            const adminMsg =
+              `🆕 Новая заявка чатбота:\n` +
+              `Тема: ${booking.topic}\n` +
+              `Время: ${booking.when}\n` +
+              `Имя: ${booking.name}\n` +
+              `Телефон: ${booking.phone}\n` +
+              `Источник: tg chat_id ${chatId}`;
+            const r = await sendTG(adminId, adminMsg);
+            if (!r.ok) console.error("Failed to send lead:", adminId);
+          } else {
+            console.error("ADMIN_CHAT_ID is not set or empty");
+          }
+    
+          await setContact(chatId, { name: booking.name, phone: booking.phone });
+          await clearBooking(chatId);
+        } else {
+          // чего-то не хватает — спрашиваем ДОточно следующий слот
+          if (next === "when")      preReply = L.askWhen[lang] || L.askWhen.en;
+          else if (next === "name") preReply = L.askName[lang] || L.askName.en;
+          else                      preReply = L.askPhone[lang] || L.askPhone.en;
+        }
+        handled = true;
       } else {
+        // 4) номера нет и автозаполнение не помогло — просим номер
         preReply = (lang === "kz")
           ? "Телефон нөмірін жіберіңіз (мүмкін +7 / бос орындармен)."
           : (lang === "en")
             ? "Please send a phone number (you can include +7 / spaces)."
             : "Пожалуйста, отправьте номер телефона (можно с +7 / пробелами).";
+        handled = true;
       }
-      handled = true;
     }
     // ==== END RECORD SLOTS ====
 

@@ -114,12 +114,13 @@ function extractName(text) {
   return null;
 }
 
-function buildRecentUserBundle(history, currentUserText, n = 4) {
+function buildRecentUserBundle(history, currentUserText, n = 6) {
   const recentUsers = history.filter(h => h.role === "user").slice(-n).map(h => h.content || "");
   return [...recentUsers, currentUserText].join(" • ");
 }
 
 // ==== Блок услуг (показываем клиенту) ====
+// ВСТАВЬ СВОЙ ПОЛНЫЙ СПИСОК
 const SERVICES_TEXT = `
 - масштабирование идеи:
 -- Раскрытие потенциала существующей или планируемой компании:
@@ -339,31 +340,33 @@ function guessTopicsFromText(text) {
   for (const p of TOPIC_PATTERNS) if (p.re.test(u)) found.add(p.topic);
   return Array.from(found);
 }
-
 function pickFirstAllowed(topics) {
-  for (const t of topics) {
-    if (ALLOWED_TOPICS.includes(t)) return t;
-  }
+  for (const t of topics) if (ALLOWED_TOPICS.includes(t)) return t;
   return null;
 }
-
+function inferTopicFromHistory(history, currentUserText = "") {
+  const bundle = buildRecentUserBundle(history, currentUserText, 6);
+  const topics = guessTopicsFromText(bundle);
+  return pickFirstAllowed(topics) || null;
+}
 function hasAllBookingFields(b) {
   return !!(b && b.topic && b.name && b.phone);
 }
 
-// Явное согласие на консультацию (не навязываем)
-const CONSENT_RE = /(оформим(?!.*документы)|давай|да,\s*давай|запиши(те)?|нужна\s*консультац|хочу\s*консультац|да,\s*хочу|можно\s*консультац)/i;
+// Явное согласие на консультацию (шире)
+const CONSENT_RE =
+/(хочу(?!\s*отказ)|давай(те)?|по(?:й|ш)ли|запиши(те)?|оформ(им|ить)\s*(?:консульт|встречу)|нужна\s*консультац|консультант|оператор|менеджер|человек|переключи(те)|позови(те)|можно\s*консультац|организуем\s*консультац|да,\s*хочу)/i;
 
 // ==== Локализация служебных фраз ====
 const L = {
   hi: {
-    ru: "Здравствуйте! Я ИИ-ассистент компании START. Чем могу помочь?",
-    kz: "Сәлеметсіз бе! Мен START компаниясының ЖИ-көмекшісімін. Қалай көмектесе аламын?",
-    en: "Hello! I’m START’s AI assistant. How can I help?"
+    ru: "Здравствуйте! Чем могу помочь?",
+    kz: "Сәлеметсіз бе! Қалай көмек бере аламын?",
+    en: "Hello! How can I help?"
   },
   askNamePhone: {
-    ru: "Хорошо. Пожалуйста, укажите ваше имя и телефон.",
-    kz: "Жақсы. Өтінемін, атыңызды және телефон нөміріңізді жазыңыз.",
+    ru: "Отлично. Пожалуйста, укажите ваше имя и телефон.",
+    kz: "Тамаша. Атыңызды және телефон нөміріңізді жазыңыз.",
     en: "Great. Please share your name and phone number."
   },
   booked: {
@@ -380,6 +383,11 @@ const L = {
     ru: "Как к вам обращаться? Пожалуйста, укажите имя.",
     kz: "Қалай жүгінейін? Атыңызды жазыңыз.",
     en: "How should we address you? Please share your name."
+  },
+  resetDone: {
+    ru: "История и запись очищены. Начнём заново.",
+    kz: "Тарих пен жазылу тазартылды. Қайтадан бастайық.",
+    en: "History and booking cleared. Let’s start over."
   }
 };
 
@@ -394,15 +402,16 @@ const COMPANY_INFO = {
 const baseSystemPrompt = `
 Ты — ИИ-ассистент компании START (г. Астана). Сайт: https://strateg.kz/.
 Стиль: деловой, дружелюбный, краткий (1–8 предложений).
+
 Правила ответа:
 - В приветствии НЕ используй слова вроде "сегодня"/"today".
 - Сначала консультируй по сути вопроса. Консультацию предлагай мягко и по делу.
-- Если пользователь ЯВНО согласился на консультацию — попроси ИМЯ и ТЕЛЕФОН одним сообщением НЕ требуй; примешь любым способом.
+- Если пользователь ЯВНО согласился на консультацию — попроси ИМЯ и ТЕЛЕФОН (как угодно, не требуй формат).
 - Не упоминай и не спрашивай время. Время менеджер уточнит сам.
-- НИКОГДА не используй фразы вида "пришлите одним сообщением".
-- Для перечисления и описания услуг опирайся СТРОГО на список ниже (SERVICES_TEXT). Если в списке услуга есть — отвечай, что мы этим занимаемся.
-- Для классификации темы заявки используй только краткие названия из ALLOWED_TOPICS.
-- Если тема уже обсуждалась и заявка отправлена, дополнительные заявки создаём только по ЯВНОМУ согласию пользователя и только если тема НОВАЯ.
+- Не используй фразы вида "пришлите одним сообщением".
+- Для перечисления и описания услуг опирайся СТРОГО на список ниже (SERVICES_TEXT). Если услуга в списке — отвечай, что мы этим занимаемся.
+- Для темы заявки используй только краткие названия из ALLOWED_TOPICS.
+- Если заявка по теме уже отправлена, новые заявки создавай только при ЯВНОМ согласии и только если тема НОВАЯ.
 
 === SERVICES_TEXT (список услуг для ответов пользователю) ===
 ${SERVICES_TEXT}
@@ -466,7 +475,7 @@ export default async function handler(req, res) {
       await clearContact(chatId);
       const langAfterReset = (await redis.get(LANG_KEY(chatId))) || "ru";
       await redis.set(LANG_KEY(chatId), langAfterReset, { ex: 60 * 60 * 24 * 30 });
-      await sendTG(chatId, LResetDone(langAfterReset));
+      await sendTG(chatId, L.resetDone[langAfterReset] || L.resetDone.ru);
       res.statusCode = 200;
       return res.end(JSON.stringify({ ok: true }));
     }
@@ -501,72 +510,51 @@ export default async function handler(req, res) {
     let handled = false;
     let preReply = null;
 
-    // 0) Если есть явное согласие на консультацию — ставим stage "collect"
+    // 0) Согласие на консультацию → ставим stage=collect, тему берём из истории если надо
     if (!booking.stage && CONSENT_RE.test(userText)) {
-      // попробуем вытащить тему из этого же сообщения
-      const tCandidates = guessTopicsFromText(userText);
-      const chosen = pickFirstAllowed(tCandidates);
-      if (chosen) booking.topic = chosen;
+      const history = await getHistory(chatId);
+      const chosenFromNow = pickFirstAllowed(guessTopicsFromText(userText));
+      booking.topic = chosenFromNow || inferTopicFromHistory(history, userText) || booking.topic || null;
       booking.stage = "collect";
       await setBooking(chatId, booking);
       preReply = L.askNamePhone[lang] || L.askNamePhone.ru;
       handled = true;
     }
 
-    // 1) Если пользователь одновременно прислал имя+телефон
-    if (!handled && !booking.stage && (hasPhone(userText) || /меня зовут|я\s*—|я\s*-/i.test(userText))) {
-      const name = extractName(userText) || "-";
-      const phone = pickPhone(userText);
-      const tCandidates = guessTopicsFromText(userText);
-      const chosen = pickFirstAllowed(tCandidates);
-      if (phone && name !== "-") {
-        booking.name = name;
-        booking.phone = phone;
-        booking.topic = booking.topic || chosen || inferTopicFromHistory(await getHistory(chatId)) || "Консультация";
-        // отправляем лид
-        await sendLeadAndReset(chatId, lang, booking);
-        handled = true;
+    // 1) Если пользователь прислал имя и/или телефон сразу (без явного согласия) — не форсим лид,
+    // но если ранее было согласие (stage=collect), то используем это.
+    if (!handled && (hasPhone(userText) || /меня зовут|я\s*—|я\s*-/i.test(userText) || isNameLike(userText))) {
+      const history = await getHistory(chatId);
+      const bundle = buildRecentUserBundle(history, userText, 6);
+      const name = extractName(userText) || extractName(bundle);
+      const phone = pickPhone(userText) || pickPhone(bundle);
+      // Если уже в режиме сбора — подставляем данные
+      if (booking.stage === "collect") {
+        if (name && isNameLike(name)) booking.name = booking.name || name;
+        if (phone && phoneOk(phone))  booking.phone = booking.phone || phone;
+        // тема как фоллбэк
+        if (!booking.topic) booking.topic = inferTopicFromHistory(history, userText) || "Консультация";
+
+        if (hasAllBookingFields(booking)) {
+          await sendLeadAndReset(chatId, lang, booking);
+          handled = true;
+        } else {
+          if (!booking.name && !booking.phone) preReply = L.askNamePhone[lang] || L.askNamePhone.ru;
+          else if (!booking.name) preReply = L.needName[lang] || L.needName.ru;
+          else if (!booking.phone) preReply = L.needPhone[lang] || L.needPhone.ru;
+          await setBooking(chatId, booking);
+          handled = true;
+        }
       }
     }
 
-    // 2) Stage "collect": ждём имя+телефон (в любом порядке, можно по одному)
-    if (!handled && booking.stage === "collect") {
-      // подтянем всё, что можем, из текущего и контекста
-      const hist = await getHistory(chatId);
-      const bundle = buildRecentUserBundle(hist, userText, 4);
-      if (!booking.name) {
-        const n = extractName(userText) || extractName(bundle);
-        if (n && isNameLike(n)) booking.name = n;
-      }
-      if (!booking.phone) {
-        const p = pickPhone(userText) || pickPhone(bundle);
-        if (p && phoneOk(p)) booking.phone = p;
-      }
-      // если тема ещё не известна — попробуем по текущему сообщению
-      if (!booking.topic || booking.topic === "Консультация") {
-        const tCandidates = guessTopicsFromText(userText);
-        const chosen = pickFirstAllowed(tCandidates);
-        if (chosen) booking.topic = chosen;
-      }
-
-      if (hasAllBookingFields(booking)) {
-        await sendLeadAndReset(chatId, lang, booking);
-        handled = true;
-      } else {
-        // спросим только то, чего не хватает
-        if (!booking.name && !booking.phone) preReply = L.askNamePhone[lang] || L.askNamePhone.ru;
-        else if (!booking.name) preReply = L.needName[lang] || L.needName.ru;
-        else if (!booking.phone) preReply = L.needPhone[lang] || L.needPhone.ru;
-        await setBooking(chatId, booking);
-        handled = true;
-      }
-    }
-
-    // 3) Повторные темы после уже отправленной заявки:
-    // Логику «автодосылки» не включаем. Только если есть ЯВНОЕ согласие и тема отлична от последней отправленной.
+    // 2) Повторные темы после уже отправленной заявки:
     if (!handled && CONSENT_RE.test(userText)) {
-      const tCandidates = guessTopicsFromText(userText);
-      const chosen = pickFirstAllowed(tCandidates);
+      const history = await getHistory(chatId);
+      const chosen = pickFirstAllowed([
+        ...guessTopicsFromText(userText),
+        ...guessTopicsFromText(buildRecentUserBundle(history, userText, 6))
+      ]);
       const distinctNew = chosen && chosen !== booking.last_topic_sent;
       if (distinctNew) {
         booking.topic = chosen;
@@ -579,7 +567,6 @@ export default async function handler(req, res) {
     }
 
     if (handled && preReply) {
-      // пост-фильтр: вырезаем нежелательные конструкции
       preReply = sanitizeAssistant(preReply);
       await pushHistory(chatId, "user", userText);
       await pushHistory(chatId, "assistant", preReply);
@@ -613,7 +600,6 @@ export default async function handler(req, res) {
       completion.choices?.[0]?.message?.content?.slice(0, 3500) ||
       (maybeHi || "Готово. Какой следующий вопрос?");
 
-    // пост-фильтр (убираем «сегодня», «одним сообщением» и т.п. из ответов, если вдруг всплывёт)
     reply = sanitizeAssistant(reply);
 
     if (history.length === 0 && (!reply || reply.trim().length < 3)) {
@@ -634,34 +620,21 @@ export default async function handler(req, res) {
 }
 
 // ==== Хелперы для логики ====
-
-function LResetDone(lang) {
-  return { ru: "История и запись очищены. Начнём заново.",
-          kz: "Тарих пен жазылу тазартылды. Қайтадан бастайық.",
-          en: "History and booking cleared. Let’s start over." }[lang] || "История и запись очищены. Начнём заново.";
-}
-
-function inferTopicFromHistory(history) {
-  const lastU = history.filter(h => h.role === "user").slice(-3).map(h => h.content || "").join(" • ");
-  const topics = guessTopicsFromText(lastU);
-  return pickFirstAllowed(topics) || null;
-}
-
 function sanitizeAssistant(text) {
   if (!text) return text;
   let t = text;
-  // уберём «одним сообщением ...»
   t = t.replace(/одним сообщением[^.!\n]*[.!\n]?/gi, "").trim();
-  // уберём навязчивые повторные призывы оформить консультацию подряд
   t = t.replace(/Если хотите оформить консультацию[^.!\n]*[.!\n]?/gi, "").trim();
-  // избегаем «сегодня?» в приветствии: не трогаем содержательные ответы
-  t = t.replace(/(Как я могу помочь вам сегодня\?)/gi, "Чем могу помочь?").trim();
-  // нормализуем двойные пробелы/пустые строки
+  t = t.replace(/Как я могу помочь вам сегодня\?/gi, "Чем могу помочь?").trim();
   t = t.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   return t;
 }
 
 async function sendLeadAndReset(chatId, lang, booking) {
+  // Фоллбэк темы из истории, если вдруг пусто
+  const history = await getHistory(chatId);
+  if (!booking.topic) booking.topic = inferTopicFromHistory(history) || "Консультация";
+
   const adminId = getAdminId();
   if (adminId) {
     const adminMsg =
@@ -674,21 +647,33 @@ async function sendLeadAndReset(chatId, lang, booking) {
   } else {
     console.error("ADMIN_CHAT_ID is not set or empty");
   }
+
   const preReply = L.booked[lang] || L.booked.ru;
   await setContact(chatId, { name: booking.name, phone: booking.phone });
-  // запомним последнюю тему, чтобы не спамить повторными лидами
   await setBooking(chatId, { stage: null, topic: null, name: null, phone: null, last_topic_sent: booking.topic || "Консультация" });
 
   await pushHistory(chatId, "assistant", preReply);
   await sendTG(chatId, preReply);
 }
 
-// ==== Отправка сообщения в Telegram ====
+function confidentLangSwitch(text) {
+  if (!text || text.trim().length === 0) return null;
+  if (/русск|рос/iu.test(text)) return "ru";
+  if (/казак|қазақ|казах/iu.test(text)) return "kz";
+  if (/english|англ|english please|en\b/iu.test(text)) return "en";
+  const hasLatin = /[A-Za-z]/.test(text);
+  const hasCyr = /[А-Яа-яЁёІіЇїЪъЫыЭэЙй]/.test(text);
+  if (hasLatin && !hasCyr) return "en";
+  const hasKazChars = /[әғқңөұүһі]/i.test(text);
+  const hasKazHints = /(саламат|салем|рахмет|жаксы|бар\s*ма|сендер|сиздер|ия\b|жок\b|қалай)/i.test(text);
+  if (hasKazChars || hasKazHints) return "kz";
+  return null;
+}
+
 function getAdminId() {
   const raw = (process.env.ADMIN_CHAT_ID || "").trim().replace(/^[\'"]|[\'"]$/g, "");
   return raw;
 }
-
 async function sendTG(chatId, text) {
   const resp = await fetch(
     `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
@@ -703,19 +688,4 @@ async function sendTG(chatId, text) {
     console.error("sendTG error", resp.status, body, "chat_id=", chatId);
   }
   return resp;
-}
-
-// ==== Язык-переключатель ====
-function confidentLangSwitch(text) {
-  if (!text || text.trim().length === 0) return null;
-  if (/русск|рос/iu.test(text)) return "ru";
-  if (/казак|қазақ|казах/iu.test(text)) return "kz";
-  if (/english|англ|english please|en\b/iu.test(text)) return "en";
-  const hasLatin = /[A-Za-z]/.test(text);
-  const hasCyr = /[А-Яа-яЁёІіЇїЪъЫыЭэЙй]/.test(text);
-  if (hasLatin && !hasCyr) return "en";
-  const hasKazChars = /[әғқңөұüһі]/i.test(text);
-  const hasKazHints = /(саламат|салем|рахмет|жаксы|бар\s*ма|сендер|сиздер|ия\b|жок\b|қалай)/i.test(text);
-  if (hasKazChars || hasKazHints) return "kz";
-  return null;
 }

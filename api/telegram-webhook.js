@@ -18,6 +18,7 @@ const LANG_KEY = (chatId) => `lang:${chatId}`;
 const BOOK_KEY = (chatId) => `book:${chatId}`;
 const CONTACT_KEY = (chatId) => `contact:${chatId}`;
 const LAST_OFFER_KEY = (chatId) => `last_offer:${chatId}`; // { topic, ts }
+const COMBINE_MULTI_TOPICS = true; // слать одну заявку с темами через запятую
 
 /* =========================
    БЛОК УСЛУГ — ВСТАВЬ СВОЙ СПИСОК
@@ -347,7 +348,8 @@ const TOPIC_PATTERNS = [
   { re: /(финанс(овый)?\s*анализ|unit\s*economics|управленческ.*отчет)/i, topic: "Финансовый анализ" },
   { re: /(финанс(овый)?\s*план|финмодель|финанс(овая)?\s*модель|прогноз|движен(ие)?\s*денег|точка\s*безубыт)/i, topic: "Финансовый план" },
   { re: /(бизнес.?план|бизнесплан|swot)/i, topic: "Бизнес-план" },
-  { re: /(презентац(ия)?\s*для\s*инвест|pitch\s*deck)/i, topic: "Презентация для инвестора" },
+  { re: /(презентац(ия|ии|ию)\s*(проекта)?)\b/i, topic: "Презентация для инвестора" },
+  { re: /(pitch\s*deck|презентац(ия)?\s*для\s*инвест)/i, topic: "Презентация для инвестора" },
   { re: /(инвестиц|investment|поиск\s*инвестор)/i, topic: "Привлечение инвестиций" },
   { re: /(стратеги(я)?\s*развития|vision)/i, topic: "Стратегия развития" },
   { re: /(концепц(ия)?\s*работы|позиционирование|имиджев)/i, topic: "Концепция работы компании" },
@@ -380,9 +382,13 @@ async function tryAutofillFrom(chatId, booking, userText) {
   const phoneHit = pickPhone(userText);
   if (!booking.phone && phoneHit && phoneOk(phoneHit)) booking.phone = phoneHit;
 
-  const topicsHit = guessTopicsAll(userText);
-  if (!booking.topic && topicsHit.length === 1) booking.topic = topicsHit[0];
-  if (!booking.multiTopics && topicsHit.length > 1) booking.multiTopics = topicsHit;
+   const topicsHit = guessTopicsAll(userText);
+   if (!booking.topic && topicsHit.length === 1) booking.topic = topicsHit[0];
+   // Раньше мы писали booking.multiTopics. Теперь — один лид с объединённой темой
+   if (topicsHit.length > 1) {
+     booking.topic = topicsHit.join(", ");
+     booking.multiTopics = null;
+   }
 
   return booking;
 }
@@ -582,25 +588,24 @@ export default async function handler(req, res) {
 
         // если контакты уже есть — сразу заявка
         const finalName = booking.name || contact.name || extractName(userText);
-        const finalPhone = booking.phone || contact.phone || pickPhone(userText);
-
-        if (finalName && isNameLike(finalName) && finalPhone && phoneOk(finalPhone)) {
-          await sendLead(chatId, topicToBook, finalName, finalPhone);
-          await setContact(chatId, { name: finalName, phone: finalPhone });
-          await clearBooking(chatId);
-          await clearLastOffer(chatId);
-          preReply = L.booked[lang] || L.booked.ru;
-          handled = true;
-        } else {
-          // нет чего-то — включаем сбор
-          booking.topic = topicToBook;
-          booking.stage = decideNextStage({ ...booking, name: finalName || booking.name, phone: finalPhone || booking.phone }) || "name";
-          await setBooking(chatId, booking);
-          preReply = (!booking.name && !finalName)
-            ? (L.askOnlyName[lang] || L.askOnlyName.ru)
-            : (L.askOnlyPhone[lang] || L.askOnlyPhone.ru);
-          handled = true;
-        }
+         const finalPhone = booking.phone || contact.phone || pickPhone(userText);
+         
+         if (finalName && isNameLike(finalName) && finalPhone && phoneOk(finalPhone)) {
+           await sendLead(chatId, topicToBook, finalName, finalPhone);
+           await setContact(chatId, { name: finalName, phone: finalPhone });
+           await clearBooking(chatId);
+           await clearLastOffer(chatId);
+           preReply = L.booked[lang] || L.booked.ru;
+           handled = true;
+         } else {
+           booking.topic = topicToBook;
+           booking.stage = decideNextStage({ ...booking, name: finalName || booking.name, phone: finalPhone || booking.phone }) || "name";
+           await setBooking(chatId, booking);
+           preReply = (!booking.name && !finalName)
+             ? (L.askOnlyName[lang] || L.askOnlyName.ru)
+             : (L.askOnlyPhone[lang] || L.askOnlyPhone.ru);
+           handled = true;
+         }
       }
     }
 
@@ -612,18 +617,24 @@ export default async function handler(req, res) {
 
       // темы из текущего сообщения (могут быть несколько)
       const topics = guessTopicsAll(userText);
-      if (topics.length > 1) booking.multiTopics = Array.from(new Set([...(booking.multiTopics || []), ...topics]));
-      if (topics.length === 1 && !booking.topic) booking.topic = topics[0];
+      if (topics.length > 1) {
+        booking.topic = topics.join(", ");
+        booking.multiTopics = null;
+      } else if (topics.length === 1 && !booking.topic) {
+        booking.topic = topics[0];
+      }
 
       // если всё собрано — отправим одну или несколько заявок
       if (hasAllBookingFields(booking)) {
         const namestr = booking.name;
         const phonestr = booking.phone;
 
-        // если есть multiTopics — шлём по каждой теме
-        const topicsToSend = (booking.multiTopics && booking.multiTopics.length)
-          ? booking.multiTopics
-          : [booking.topic || "Консультация"];
+        // шлём все темы
+        const topicsToSend = [booking.topic || "Консультация"]; // всегда одна строка
+        for (const t of topicsToSend) {
+          await sendLead(chatId, t, namestr, phonestr);
+        }
+
 
         for (const t of topicsToSend) {
           await sendLead(chatId, t, namestr, phonestr);
@@ -652,9 +663,7 @@ export default async function handler(req, res) {
         if (hasAllBookingFields(booking) || (booking.name && (booking.phone || (contact && contact.phone)))) {
           const namestr = booking.name || contact.name;
           const phonestr = booking.phone || (contact && contact.phone);
-          const topicsToSend = (booking.multiTopics && booking.multiTopics.length)
-            ? booking.multiTopics
-            : [booking.topic || "Консультация"];
+          const topicsToSend = [booking.topic || "Консультация"];
           for (const t of topicsToSend) {
             await sendLead(chatId, t, namestr, phonestr);
           }
@@ -684,9 +693,7 @@ export default async function handler(req, res) {
         if (hasAllBookingFields(booking) || (booking.phone && (booking.name || (contact && contact.name)))) {
           const namestr = booking.name || (contact && contact.name);
           const phonestr = booking.phone;
-          const topicsToSend = (booking.multiTopics && booking.multiTopics.length)
-            ? booking.multiTopics
-            : [booking.topic || "Консультация"];
+          const topicsToSend = [booking.topic || "Консультация"];
           for (const t of topicsToSend) {
             await sendLead(chatId, t, namestr, phonestr);
           }
@@ -739,34 +746,29 @@ export default async function handler(req, res) {
     });
     let reply = completion.choices?.[0]?.message?.content?.slice(0, 3500) || "";
 
-    // Мягкий оффер: если явный интерес (есть тема в текущем тексте) и мы ещё НЕ в слоте
-    const topicsNow = guessTopicsAll(userText);
-    if (!booking.stage && topicsNow.length > 0) {
-      // формируем вежливую строку без «одним сообщением»
-      const topicLabel = topicsNow.length === 1 ? topicsNow[0] : topicsNow.join(", ");
-      const offerLine =
-        lang === "ru"
-          ? `\n\nЕсли хотите, оформлю консультацию по теме: ${topicLabel}. Можете просто написать имя и телефон.`
-          : lang === "kz"
-          ? `\n\nҚаласаңыз, ${topicLabel} тақырыбы бойынша консультацияға жазамын. Аты-жөніңіз бен телефон нөмірін жаза беріңіз.`
-          : `\n\nIf you wish, I can arrange a consultation on: ${topicLabel}. Just send your name and phone.`;
-      reply = (reply || "").trim() + offerLine;
-
-      // подготавливаем слоты: если несколько тем — зафиксируем их
-      booking.stage = decideNextStage(booking) || "name";
-      if (topicsNow.length > 1) {
-        booking.multiTopics = topicsNow;
-        booking.topic = null;
-      } else if (topicsNow.length === 1) {
-        booking.topic = topicsNow[0];
-        booking.multiTopics = null;
-      }
-      await setBooking(chatId, booking);
-
-      // сохраним последнюю ПРОСЬБУ по теме (для «умного да»)
-      // если несколько тем — возьмём первую как «последнюю предложенную»
-      await setLastOffer(chatId, topicsNow[0]);
-    }
+   // Темы в ответе ассистента — чтобы «Хочу» сработало даже после общего вопроса
+   const replyTopics = guessTopicsAll(reply);
+   
+   // Мягкий оффер по сообщению пользователя (как было)
+   const topicsNow = guessTopicsAll(userText);
+   
+   // Если у пользователя тем нет, но ассистент явно говорил про одну тему — сохраним её как last_offer
+   if (!booking.stage && topicsNow.length === 0 && replyTopics.length === 1) {
+     await setLastOffer(chatId, replyTopics[0]);
+   }
+     
+   if (!booking.stage && topicsNow.length > 0) {
+     const topicLabel = topicsNow.join(", ");
+     const offerLine = /* как у вас, только topicLabel без массивов */;
+     reply = (reply || "").trim() + offerLine;
+   
+     booking.stage = decideNextStage(booking) || "name";
+     booking.topic = topicLabel;      // одна строка с темами
+     booking.multiTopics = null;
+     await setBooking(chatId, booking);
+   
+     await setLastOffer(chatId, topicsNow[0]); // первую пометим как «последняя предложенная»
+   }
 
     if (!reply || reply.trim().length < 3) {
       reply = (lang === "ru")

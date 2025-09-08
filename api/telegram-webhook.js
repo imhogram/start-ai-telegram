@@ -18,7 +18,8 @@ const LANG_KEY = (chatId) => `lang:${chatId}`;
 const BOOK_KEY = (chatId) => `book:${chatId}`;
 const CONTACT_KEY = (chatId) => `contact:${chatId}`;
 const LAST_OFFER_KEY = (chatId) => `last_offer:${chatId}`; // { topic, ts }
-// Объединять несколько тем в одну заявку (true  или false)
+
+/* Объединять несколько тем в одну заявку */
 const COMBINE_MULTI_TOPICS = true;
 
 /* =========================
@@ -316,44 +317,61 @@ function _cleanTail(str) {
   return (str || "").replace(/[.,;!?…]+$/u, "").trim();
 }
 
+/* Расширенный список стоп-слов для имени */
+const NAME_STOP = new Set([
+  "телефон","тел","номер","phone","whatsapp","ватсап",
+  "сайт","логотип","таргет","реклама","смм","smm",
+  "преза","презентация","консультация","заявка",
+  "мне","нужно","нужна","нужен","нужны","сколько","цена","стоимость",
+  "ок","окей","ага","угу","да"
+]);
+
 /* Универсальный нормализатор имени */
 function normalizeName(name) {
   if (!name) return name;
   let s = String(name).trim();
-  // убрать предикаты
-  s = s.replace(/^\s*(меня\s+зовут|зовут|звать|имя|мое\s+имя|моё\s+имя|name|my\s+name\s+is|атым|менің\s+атым)\s+/iu, "");
-  // заглавные буквы
+  s = s.replace(/^\s*(меня\s+зовут|зовут|имя|name|my\s+name\s+is|атым|менің\s+атым)\s+/iu, "");
   s = s.replace(/\b([A-ZА-ЯЁӘҒҚҢӨҰҮҺІ])([a-zа-яёәғқңөұүһі-]*)/giu,
     (_, a, b) => a.toUpperCase() + (b || "").toLowerCase()
   );
   return s.trim();
 }
 
-/* Извлечение имени (устойчивое к «телефон/преза») */
+/* Извлечение имени (консервативное) */
 function extractName(text) {
   if (!text) return null;
   const src = text.replace(/[\u00A0\u202F\u2009]/g, " ").replace(/\s+/g, " ").trim();
 
-  const STOP_WORD = /^(телефон|тел|номер|phone|whatsapp|ватсап|консультация|нужно|нужна|нужен|ок|окей|да|ага|аха|угу)$/i;
+  // 1) Явные фразы
+  const m1 = src.match(/\b(меня\s+зовут|зовут|имя|my\s+name\s+is|name|менің\s+атым|атым)\s+([A-ZА-ЯЁӘҒҚҢӨҰҮҺІ][\p{L}-]{2,}(?:\s+[A-ZА-ЯЁӘҒҚҢӨҰҮҺІ][\p{L}-]{2,})?)\b/iu);
+  if (m1) {
+    const cand = _cleanTail(m1[2]);
+    const tokens = cand.split(/\s+/);
+    if (tokens.every(t => !NAME_STOP.has(t.toLowerCase()))) return normalizeName(cand);
+  }
 
-  const p0 = src.match(/\b(меня\s+зовут|зовут|имя|my\s+name\s+is|name|менің\s+атым|атым)\s+([A-ZА-ЯЁӘҒҚҢӨҰҮҺІ][\p{L}-]{2,}(?:\s+[A-ZА-ЯЁӘҒҚҢӨҰҮҺІ][\p{L}-]{2,})?)\b/iu);
-  if (p0 && !STOP_WORD.test(p0[2])) return normalizeName(p0[2]);
+  const m2 = src.match(/^(?:я|мен)\s*[—\-]?\s*([A-ZА-ЯЁӘҒҚҢӨҰҮҺІ][\p{L}-]{2,}(?:\s+[A-ZА-ЯЁӘҒҚҢӨҰҮҺІ][\p{L}-]{2,})?)(?:\b|$)/iu);
+  if (m2) {
+    const cand = _cleanTail(m2[1]);
+    const tokens = cand.split(/\s+/);
+    if (tokens.every(t => !NAME_STOP.has(t.toLowerCase()))) return normalizeName(cand);
+  }
 
-  const p1 = src.match(/^(?:я|мен)\s*[—\-]?\s*([A-ZА-ЯЁӘҒҚҢӨҰҮҺІ][\p{L}-]{2,}(?:\s+[A-ZА-ЯЁӘҒҚҢӨҰҮҺІ][\p{L}-]{2,})?)(?:\b|$)/iu);
-  if (p1 && !STOP_WORD.test(p1[1])) return normalizeName(p1[1]);
-
-  const beforePhone = src.split(/[\+\d][\d\-\s().]{5,}/)[0] || src;
-
-  const tokens = beforePhone.split(/[•,;\n]+/).join(" ").split(/\s+/).filter(Boolean);
-  for (let i = tokens.length - 1; i >= 0; i--) {
-    const last = tokens[i];
-    if (!STOP_WORD.test(last) && isStrictNameToken(last)) {
-      if (i - 1 >= 0 && !STOP_WORD.test(tokens[i - 1]) && isStrictNameToken(tokens[i - 1])) {
-        return normalizeName(`${tokens[i - 1]} ${last}`);
+  // 2) Только если есть телефон в сообщении — допускаем 1–2 красивых токена до телефона
+  if (hasPhone(src)) {
+    const beforePhone = src.split(/[\+\d][\d\-\s().]{5,}/)[0] || src;
+    const tokens = beforePhone.split(/[•,;\n]+/).join(" ").split(/\s+/).filter(Boolean);
+    for (let i = tokens.length - 1; i >= 0; i--) {
+      const last = tokens[i];
+      if (!NAME_STOP.has(last.toLowerCase()) && isStrictNameToken(last)) {
+        if (i - 1 >= 0 && !NAME_STOP.has(tokens[i - 1].toLowerCase()) && isStrictNameToken(tokens[i - 1])) {
+          return normalizeName(`${tokens[i - 1]} ${last}`);
+        }
+        return normalizeName(last);
       }
-      return normalizeName(last);
     }
   }
+
   return null;
 }
 
@@ -592,7 +610,7 @@ export default async function handler(req, res) {
     }
 
     // ===== «УМНОЕ СОГЛАСИЕ» ПО ПОСЛЕДНЕЙ ПРЕДЛОЖЕННОЙ ТЕМЕ =====
-    if (/\b(хорошо|давайте|давай|хочу|хотим|вперед|вперёд|нужно|нужна|нужен|оформим|оформить|готов|консульт|проконсульт|интересует\s*консультац|поехали|запиши|запишите|записать|да|ну\s*да|ага|аха|угу|ок|окей|ok|okey|go|lets\s*go)\b/iu.test(userText)) {
+    if (/\b(давайте|давай|хочу|нужно|нужна|нужен|оформим|оформить|готов|интересует\s*консультац|поехали|запишите|записать|ну\s*да|ага|угу|ок|окей|go)\b/iu.test(userText)) {
       let topicToBook = null;
 
       // 1) свежий last_offer
@@ -625,9 +643,7 @@ export default async function handler(req, res) {
         if (finalName) finalName = normalizeName(finalName);
 
         // защита от псевдо-имён
-        if (finalName && /^(тел|телефон|номер|phone|whatsapp|ватсап)$/i.test(finalName)) {
-          finalName = null;
-        }
+        if (finalName && NAME_STOP.has(finalName.toLowerCase())) finalName = null;
 
         if (finalName && isNameLike(finalName) && finalPhone && phoneOk(finalPhone)) {
           await sendLead(chatId, topicToBook, finalName, finalPhone);
@@ -636,13 +652,13 @@ export default async function handler(req, res) {
           await clearLastOffer(chatId);
           preReply = L.booked[lang] || L.booked.ru;
 
-          // немедленно выходим, чтобы бот не успел спросить контакты снова
           await pushHistory(chatId, "user", userText);
           await pushHistory(chatId, "assistant", preReply);
           await sendTG(chatId, preReply);
           res.statusCode = 200;
           return res.end(JSON.stringify({ ok: true }));
         } else {
+          // аккуратно дособираем ТОЛЬКО при согласии
           booking.topic = topicToBook;
           booking.stage = decideNextStage({
             ...booking,
@@ -679,9 +695,7 @@ export default async function handler(req, res) {
       if (hasAllBookingFields(booking)) {
         const namestr = normalizeName(booking.name);
         const phonestr = booking.phone;
-        const topicsToSend = COMBINE_MULTI_TOPICS
-          ? [booking.topic]
-          : booking.topic.split(",").map(s => s.trim()).filter(Boolean);
+        const topicsToSend = [booking.topic]; // при COMBINE_MULTI_TOPICS это уже объединённая строка
 
         for (const t of topicsToSend) {
           await sendLead(chatId, t, namestr, phonestr);
@@ -701,7 +715,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 2) Стадия name
+    // 2) Стадия name (активируется теперь ТОЛЬКО при согласии или после телефона)
     if (!handled && booking.stage === "name") {
       // если контакт уже есть полностью — шлём без вопросов
       if (contact && contact.name && contact.phone) {
@@ -724,7 +738,7 @@ export default async function handler(req, res) {
           for (const t of topicsToSend) await sendLead(chatId, t, namestr, phonestr);
           await setContact(chatId, { name: namestr, phone: phonestr });
           await clearBooking(chatId);
-          preReply = L.booked[lang] || L.booked.ru;
+          preReply = L.booked[lang] || L.bookед.ru;
         } else {
           booking.stage = "phone";
           await setBooking(chatId, booking);
@@ -791,7 +805,7 @@ export default async function handler(req, res) {
       return res.end(JSON.stringify({ ok: true }));
     }
 
-    /* ===== Обычный ИИ-ответ + мягкий оффер ===== */
+    /* ===== Обычный ИИ-ответ + мягкий оффер (без запуска слотов) ===== */
     const history = await getHistory(chatId);
     const languageLine = lang === "ru"
       ? "Отвечай на русском языке."
@@ -813,12 +827,10 @@ export default async function handler(req, res) {
     });
     let reply = completion.choices?.[0]?.message?.content?.slice(0, 3500) || "";
 
-    // Темы в ответе ассистента — для «Да/Ок» даже после общего ответа
     const replyTopics = guessTopicsAll(reply);
-    // Темы из текущего сообщения пользователя
     const topicsNow = guessTopicsAll(userText);
 
-    // A) Если пользователь явно назвал темы — делаем оффер по ним
+    // A) Пользователь назвал темы — делаем оффер, НО слоты не включаем
     if (!booking.stage && topicsNow.length > 0) {
       const topicLabel = COMBINE_MULTI_TOPICS ? topicsNow.join(", ") : topicsNow[0];
 
@@ -832,24 +844,21 @@ export default async function handler(req, res) {
           )
         : (
             lang === "ru"
-              ? `\n\nЕсли хотите, оформлю консультацию по теме: ${topicLabel}. Для этого напишите своё Имя и Телефон.`
+              ? `\n\nЕсли хотите, оформлю консультацию по теме: ${topicLabel}. Для этого отправьте Имя и Телефон одним сообщением.`
               : lang === "kz"
-              ? `\n\nҚаласаңыз, ${topicLabel} бойынша консультацияға жазамын. Аты-жөніңіз бен Телефон нөміріңізді жазыңыз.`
-              : `\n\nIf you want, I can arrange a consultation on: ${topicLabel}. You can just send your Name and Phone.`
+              ? `\n\nҚаласаңыз, ${topicLabel} бойынша консультацияға жазамын. Бір хабарламада Аты-жөніңіз бен Телефон нөміріңізді жіберіңіз.`
+              : `\n\nIf you want, I can arrange a consultation on: ${topicLabel}. Please send your Name and Phone in one message.`
           );
 
       reply = (reply || "").trim() + offerLine;
 
-      // если контакт уже есть — НЕ запускаем слоты
-      if (!(contact && contact.phone)) {
-        booking.stage = decideNextStage(booking) || "name";
-      }
+      // Просто запомним последнюю предложенную тему — слоты не включаем
+      await setLastOffer(chatId, topicsNow[0]);
+      // Запишем тему в booking, но stage не трогаем
       booking.topic = topicLabel;
       await setBooking(chatId, booking);
-
-      await setLastOffer(chatId, topicsNow[0]); // запомним первую тему
     }
-    // B) Если пользователь темы не назвал, но ассистент упомянул ровно одну — просто запомним её как last_offer
+    // B) Пользователь темы не назвал, но ассистент — одну → просто запомним её
     else if (!booking.stage && topicsNow.length === 0 && replyTopics.length === 1) {
       await setLastOffer(chatId, replyTopics[0]);
     }

@@ -61,8 +61,8 @@ const SERVICES_TEXT = `
 --- анализ планируемых доходов и расходов;
 --- расчет рентабельности и окупаемости;
 --- SWOT-анализ.
-- презентация для инвестора:
--- Краткий бизнес-план проекта для привлечения инвестиций:
+- презентация проекта:
+-- Краткий бизнес-план проекта:
 --- описание проекта;
 --- план освоения и возврата инвестиций;
 --- расчет рентабельности и окупаемости;
@@ -181,7 +181,7 @@ const SERVICES_TEXT = `
 --- интеграция и настройка WhatsApp, Telegram, Instagram, OLX, чат на сайте, форм заявок с сайта;
 --- настройка этапов и воронок продаж, смена ответственных;
 --- автоматизация бизнес-процессов (задачи, дела, сроки, напоминания);
---- внедрение и обучение ИИ чат-бота для быстрой обработки обращений клиентов 24/7;
+--- разработка и обучение ИИ чат-бота для быстрой обработки обращений клиентов 24/7;
 --- настройка сквозной аналитики для оценки эффективности рекламы.
 - франчайзинг:
 -- Разработка и упаковка во франшизу действующего или нового бизнеса:
@@ -348,8 +348,7 @@ const TOPIC_PATTERNS = [
   { re: /(финанс(овый)?\s*анализ|unit\s*economics|управленческ.*отчет)/i, topic: "Финансовый анализ" },
   { re: /(финанс(овый)?\s*план|финмодель|финанс(овая)?\s*модель|прогноз|движен(ие)?\s*денег|точка\s*безубыт)/i, topic: "Финансовый план" },
   { re: /(бизнес.?план|бизнесплан|swot)/i, topic: "Бизнес-план" },
-  { re: /(презентац(ия|ии|ию)\s*(проекта)?)\b/i, topic: "Презентация для инвестора" },
-  { re: /(pitch\s*deck|презентац(ия)?\s*для\s*инвест)/i, topic: "Презентация для инвестора" },
+  { re: /(през(ентац(ия|ии|ию)|а|у|ку|ка|ент(?![а-я]))(\s*проекта|компании|о компании)?|pitch\s*deck)/i, topic: "Презентация проекта" },
   { re: /(инвестиц|investment|поиск\s*инвестор)/i, topic: "Привлечение инвестиций" },
   { re: /(стратеги(я)?\s*развития|vision)/i, topic: "Стратегия развития" },
   { re: /(концепц(ия)?\s*работы|позиционирование|имиджев)/i, topic: "Концепция работы компании" },
@@ -594,7 +593,19 @@ export default async function handler(req, res) {
        const fromUser = guessTopicsAll(prevUser);
        const fromA    = guessTopicsAll(prevA);
        const picked   = (fromUser.length ? fromUser : fromA);
-   
+
+        // мини-фолбэк на разговорные формы (если вдруг основной паттерн не сработал)
+         let picked2 = picked;
+         if (!picked2.length) {
+           const softHit = /(през(а|у|ку|ка)|презент(?![а-я]))/i.test(prevUser) ? ["Презентация для инвестора"] : [];
+           picked2 = softHit.length ? softHit : picked;
+         }
+         
+         if (picked2.length) {
+           topicToBook = COMBINE_MULTI_TOPICS ? picked2.join(", ") : picked2[0];
+           await setLastOffer(chatId, COMBINE_MULTI_TOPICS ? picked2[0] : topicToBook);
+         }
+        
        if (picked.length) {
          topicToBook = COMBINE_MULTI_TOPICS ? picked.join(", ") : picked[0];
          // и заодно запомним как last_offer, чтобы «давайте» в следующей реплике тоже работало
@@ -768,12 +779,17 @@ export default async function handler(req, res) {
    // Темы из текущего сообщения пользователя
    const topicsNow = guessTopicsAll(userText);
    
-   // Если у пользователя тем нет, но ассистент явно упомянул одну — зафиксируем как last_offer
+   // 1) Если пользователь назвал тему(ы) — сразу запомним первую как last_offer
+   if (!booking.stage && topicsNow.length > 0) {
+     await setLastOffer(chatId, topicsNow[0]);
+   }
+   
+   // 2) Если пользователь тем не назвал, но ассистент упомянул ровно одну — запомним её
    if (!booking.stage && topicsNow.length === 0 && replyTopics.length === 1) {
      await setLastOffer(chatId, replyTopics[0]);
    }
    
-   // Если пользователь явно назвал тему(ы) — добавим мягкий оффер и подготовим слоты
+   // 3) Мягкий оффер пользователю по его теме(ам)
    if (!booking.stage && topicsNow.length > 0) {
      const topicLabel = COMBINE_MULTI_TOPICS ? topicsNow.join(", ") : topicsNow[0];
    
@@ -786,11 +802,11 @@ export default async function handler(req, res) {
    
      reply = (reply || "").trim() + offerLine;
    
-     // Готовим сбор контакта и запоминаем last_offer для «Давайте»
      booking.stage = decideNextStage(booking) || "name";
      booking.topic = topicLabel;
      await setBooking(chatId, booking);
-     await setLastOffer(chatId, COMBINE_MULTI_TOPICS ? topicsNow[0] : topicLabel);
+   
+     // last_offer уже сохранён в п.1)
    }
 
     if (!reply || reply.trim().length < 3) {

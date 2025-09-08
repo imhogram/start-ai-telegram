@@ -320,7 +320,9 @@ function extractName(text) {
   if (!text) return null;
   const src = text.replace(/[\u00A0\u202F\u2009]/g, " ").replace(/\s+/g, " ").trim();
 
-  const p1 = src.match(/\b(меня зовут|my name is|менің атым)\s+([A-ZА-ЯЁӘҒҚҢӨҰҮҺІ][\p{L}-]{2,}(?:\s+[A-ZА-ЯЁӘҒҚҢӨҰҮҺІ][\p{L}-]{2,})?)\b/iu);
+  const STOP_WORD = /^(тел|телефон|номер|phone|whatsapp|ватсап)$/i;
+
+  const p1 = src.match(/\b(меня зовут|имя|my name is|name|менің атым|атым)\s+([A-ZА-ЯЁӘҒҚҢӨҰҮҺІ][\p{L}-]{2,}(?:\s+[A-ZА-ЯЁӘҒҚҢӨҰҮҺІ][\p{L}-]{2,})?)\b/iu);
   if (p1) return _cleanTail(p1[2]);
 
   const p2 = src.match(/^(?:я|мен)\s*[—\-]?\s*([A-ZА-ЯЁӘҒҚҢӨҰҮҺІ][\p{L}-]{2,}(?:\s+[A-ZА-ЯЁӘҒҚҢӨҰҮҺІ][\p{L}-]{2,})?)(?:\b|$)/iu);
@@ -331,8 +333,8 @@ function extractName(text) {
   const tokens = beforePhone.split(/[•,;\n]+/).join(" ").split(/\s+/).filter(Boolean);
   for (let i = tokens.length - 1; i >= 0; i--) {
     const last = tokens[i];
-    if (isStrictNameToken(last)) {
-      if (i - 1 >= 0 && isStrictNameToken(tokens[i - 1])) {
+    if (isStrictNameToken(last) && !STOP_WORD.test(last)) {
+      if (i - 1 >= 0 && isStrictNameToken(tokens[i - 1]) && !STOP_WORD.test(tokens[i - 1])) {
         return `${tokens[i - 1]} ${last}`;
       }
       return last;
@@ -616,9 +618,21 @@ export default async function handler(req, res) {
      // 3) Если тему поняли — пробуем сразу отправить лид, используя кэш контакта
      if (topicToBook) {
        const contact = (await getContact(chatId)) || {};
-       const finalName  = booking.name  || contact.name  || extractName(userText);
-       const finalPhone = booking.phone || contact.phone || pickPhone(userText);
-   
+      // СНАЧАЛА кэш, потом букинг, потом извлечение из текущего текста
+      const finalName  = (contact && contact.name)  || booking.name  || extractName(userText);
+      const finalPhone = (contact && contact.phone) || booking.phone || pickPhone(userText);
+
+      if (!finalName || /^(тел|телефон|номер|phone|whatsapp|ватсап)$/i.test(finalName)) {
+        // не считаем это именем
+        // попробуем имя из booking или из текста ещё раз:
+        const nameTry = booking.name || extractName(userText);
+        if (nameTry && !/^(телефон|номер|phone|whatsapp|ватсап)$/i.test(nameTry)) {
+          // используем nameTry
+        } else {
+          // пусть останется undefined — тогда попросим только имя (если нет контакта)
+        }
+      }
+
        if (finalName && isNameLike(finalName) && finalPhone && phoneOk(finalPhone)) {
          await sendLead(chatId, topicToBook, finalName, finalPhone);
          await setContact(chatId, { name: finalName, phone: finalPhone });
@@ -645,9 +659,13 @@ export default async function handler(req, res) {
 
     // 1) Телефон в сообщении — пытаемся закрыть лид
     if (!handled && hasPhone(userText)) {
-      booking.phone = pickPhone(userText) || booking.phone;
-      const n = extractName(userText);
-      if (n && isNameLike(n)) booking.name = n;
+     booking.phone = pickPhone(userText) || booking.phone;
+   
+     // имя из кэша важнее — не затираем его
+     if (!(contact && contact.name)) {
+       const n = extractName(userText);
+       if (n && isNameLike(n)) booking.name = n;
+     }
 
       const topics = guessTopicsAll(userText);
       if (topics.length > 1) {
@@ -785,28 +803,35 @@ export default async function handler(req, res) {
    }
    
    // 2) Если пользователь тем не назвал, но ассистент упомянул ровно одну — запомним её
-   if (!booking.stage && topicsNow.length === 0 && replyTopics.length === 1) {
-     await setLastOffer(chatId, replyTopics[0]);
-   }
-   
-   // 3) Мягкий оффер пользователю по его теме(ам)
    if (!booking.stage && topicsNow.length > 0) {
      const topicLabel = COMBINE_MULTI_TOPICS ? topicsNow.join(", ") : topicsNow[0];
    
-     const offerLine =
-       lang === "ru"
-         ? `\n\nЕсли хотите, оформлю консультацию по теме: ${topicLabel}. Можете просто написать имя и телефон.`
-         : lang === "kz"
-         ? `\n\nҚаласаңыз, мына тақырып бойынша консультацияға жазамын: ${topicLabel}. Аты-жөніңіз бен телефон нөміріңізді жаза беріңіз.`
-         : `\n\nIf you want, I can arrange a consultation on: ${topicLabel}. You can just send your name and phone.`;
+     const offerLine = (contact && contact.phone)
+       ? (
+           lang === "ru"
+             ? `\n\nЕсли хотите, оформлю консультацию по теме: ${topicLabel}. Просто напишите «Да».`
+             : lang === "kz"
+             ? `\n\nҚаласаңыз, ${topicLabel} бойынша консультацияға жазамын. Жай ғана «Иә» деп жазыңыз.`
+             : `\n\nIf you want, I’ll arrange a consultation on: ${topicLabel}. Just reply “Yes”.`
+         )
+       : (
+           lang === "ru"
+             ? `\n\nЕсли хотите, оформлю консультацию по теме: ${topicLabel}. Для этого напишите своё Имя и Телефон.`
+             : lang === "kz"
+             ? `\n\nҚаласаңыз, ${topicLabel} бойынша консультацияға жазамын. Аты-жөніңіз бен Телефон нөміріңізді жазыңыз.`
+             : `\n\nIf you want, I can arrange a consultation on: ${topicLabel}. You can just send your Name and Phone.`
+         );
    
      reply = (reply || "").trim() + offerLine;
    
-     booking.stage = decideNextStage(booking) || "name";
+     // ✅ важное изменение: когда контакт уже есть — НЕ запускаем слот-сборщик
+     if (!(contact && contact.phone)) {
+       booking.stage = decideNextStage(booking) || "name";
+     }
      booking.topic = topicLabel;
      await setBooking(chatId, booking);
    
-     // last_offer уже сохранён в п.1)
+     await setLastOffer(chatId, topicsNow[0]); // запомним первую тему
    }
 
     if (!reply || reply.trim().length < 3) {

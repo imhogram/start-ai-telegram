@@ -344,6 +344,19 @@ function guessTopicsAll(userText) {
   return Array.from(set);
 }
 
+/* Научим бота понимать формат «Имя, Город, Сфера» в одном сообщении */
+function parseInlineLead(text) {
+  if (!text) return null;
+  const parts = text.split(/[,\n;/]+/).map(s => s.trim()).filter(Boolean);
+  if (parts.length >= 3) {
+    const name = normalizeName(parts[0]);
+    const city = parts[1].slice(0, 100);
+    const sphere = parts.slice(2).join(", ").slice(0, 200);
+    if (isNameLike(name)) return { name, city, sphere };
+  }
+  return null;
+}
+
 /* Автозаполнение из сообщения + профиля WA */
 async function tryAutofillFrom(id, booking, userText, waProfileName) {
   if (!booking.name && waProfileName && isNameLike(waProfileName)) {
@@ -370,9 +383,9 @@ function decideNextStage(b) {
 /* Локализация (краткие реплики) */
 const L = {
   hi: {
-    ru: "Здравствуйте! Я ИИ-ассистент START. Чем могу помочь?",
+    ru: "Здравствуйте! Я ИИ-ассистент компании START. Чем могу помочь?",
     kz: "Сәлеметсіз бе! Мен START компаниясының ЖИ-көмекшісімін. Қалай көмектесе аламын?",
-    en: "Hello! I’m START’s AI assistant. How can I help?",
+    en: "Hello! I’m START company’s AI assistant. How can I help?",
   },
   askOnlyName: {
     ru: "Спасибо! Как к вам обращаться (имя)?",
@@ -406,6 +419,7 @@ const COMPANY_INFO = {
   address: "г. Астана, шоссе Коргалжын, 3, БЦ SMART, 4 этаж, офис 405",
   phone: "+77776662115",
   worktime: "Пн–Пт, 10:00–18:00",
+  site: "https://strateg.kz",
 };
 
 /* Системный промпт под WA (без запроса времени/дат !) */
@@ -415,7 +429,7 @@ const baseSystemPrompt = `
 Не используй в приветствии слова «сегодня/today».
 Никогда не проси/не упоминай время, дату или согласование времени — этим займётся менеджер.
 Если спрашивают про цены/сроки — отвечай, что расчёт индивидуальный после консультации.
-Адрес: ${COMPANY_INFO.address}. Телефон: ${COMPANY_INFO.phone}. Время работы: ${COMPANY_INFO.worktime}.
+Адрес: ${COMPANY_INFO.address}. Телефон: ${COMPANY_INFO.phone}. Время работы: ${COMPANY_INFO.worktime}. Адрес сайта: ${COMPANY_INFO.site}.
 Полный перечень услуг: см. блок SERVICES_TEXT (используй ТОЛЬКО эти услуги).
 `;
 
@@ -738,6 +752,44 @@ export default async function handler(req, res) {
           }
         }
 
+         // ==== Однострочная заявка: "Имя, Город, Сфера" ====
+         const inline = parseInlineLead(userText);
+         if (inline) {
+           booking.name = booking.name || inline.name;
+           booking.city = booking.city || inline.city;
+           booking.sphere = booking.sphere || inline.sphere;
+           if (!booking.topic) {
+             const tNow = guessTopicsAll(userText);
+             booking.topic = tNow.length ? (COMBINE_MULTI_TOPICS ? tNow.join(", ") : tNow[0]) : (await getLastOffer(waId))?.topic || "Консультация";
+           }
+           if (hasAllBookingFields(booking)) {
+             const name = normalizeName(booking.name || waProfileName || "—");
+             await notifyLead(waId, booking.topic, name, booking.city, booking.sphere);
+             await setContact(waId, { name });
+             await clearBooking(waId);
+             await clearLastOffer(waId);
+             const txt = L.booked[lang] || L.booked.ru;
+             await pushHistory(waId, "user", userText);
+             await pushHistory(waId, "assistant", txt);
+             await sendWA(waId, txt);
+             continue;
+           } else {
+             // спросим недостающее
+             const next = decideNextStage(booking) || "name";
+             booking.stage = next;
+             await setBooking(waId, booking);
+             const prompt = (next === "name")
+               ? (L.askOnlyName[lang] || L.askOnlyName.ru)
+               : (next === "city")
+               ? (L.askCity[lang] || L.askCity.ru)
+               : (L.askSphere[lang] || L.askSphere.ru);
+             await pushHistory(waId, "user", userText);
+             await pushHistory(waId, "assistant", prompt);
+             await sendWA(waId, prompt);
+             continue;
+           }
+         }
+
         // ===== ИИ-ответ + мягкий оффер (без запуска слотов) =====
         const history = await getHistory(waId);
         const languageLine = lang === "ru"
@@ -763,19 +815,27 @@ export default async function handler(req, res) {
         // мягкий оффер с фиксацией last_offer
         const topicsNow = guessTopicsAll(userText);
         const replyTopics = guessTopicsAll(reply);
+         
         if (!booking.stage && topicsNow.length > 0) {
           const topicLabel = COMBINE_MULTI_TOPICS ? topicsNow.join(", ") : topicsNow[0];
-          reply = (reply || "").trim() + (
-            lang === "ru"
-              ? `\n\nЕсли хотите, подготовлю консультацию по теме: ${topicLabel}. Для этого пришлите Имя, Город и Сферу деятельности.`
-              : lang === "kz"
-              ? `\n\nҚаласаңыз, ${topicLabel} бойынша консультация дайындаймын. Ол үшін Атыңызды, Қалаңызды және Сфераңызды жазыңыз.`
-              : `\n\nIf you want, I’ll arrange a consultation on: ${topicLabel}. Please send your Name, City and Business field.`
-          );
+          const plural = (topicsNow.length > 1);
+          const ruLine = plural
+            ? `\n\nЕсли хотите, подготовлю консультацию по темам: ${topicLabel}. Для этого пришлите Имя, Город и Сферу деятельности.`
+            : `\n\nЕсли хотите, подготовлю консультацию по теме: ${topicLabel}. Для этого пришлите Имя, Город и Сферу деятельности.`;
+          const kzLine = plural
+            ? `\n\nҚаласаңыз, келесі тақырыптар бойынша консультация дайындаймын: ${topicLabel}. Ол үшін Атыңызды, Қалаңызды және Сфераңызды жазыңыз.`
+            : `\n\nҚаласаңыз, ${topicLabel} бойынша консультация дайындаймын. Ол үшін Атыңызды, Қалаңызды және Сфераңызды жазыңыз.`;
+          const enLine = plural
+            ? `\n\nIf you want, I’ll arrange a consultation on these topics: ${topicLabel}. Please send your Name, City and Business field.`
+            : `\n\nIf you want, I’ll arrange a consultation on: ${topicLabel}. Please send your Name, City and Business field.`;
+         
+          reply = (reply || "").trim() + (lang === "kz" ? kzLine : lang === "en" ? enLine : ruLine);
+         
           await setLastOffer(waId, topicsNow[0]);
           booking.topic = topicLabel;
           await setBooking(waId, booking);
-        } else if (!booking.stage && topicsNow.length === 0 && replyTopics.length === 1) {
+        }
+          else if (!booking.stage && topicsNow.length === 0 && replyTopics.length === 1) {
           await setLastOffer(waId, replyTopics[0]);
         }
 

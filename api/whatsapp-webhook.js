@@ -438,24 +438,44 @@ async function sendTG(chatId, text) {
   return resp;
 }
 
-/* Отправка WA-сообщений */
+/* Отправка WA-сообщений (с патчем на "8") */
 async function sendWA(toWaId, text) {
   const url = `https://graph.facebook.com/v20.0/${META_WA_PHONE_NUMBER_ID}/messages`;
-  const payload = {
-    messaging_product: "whatsapp",
-    to: toWaId,
-    text: { body: text?.slice(0, 3500) || "" },
-  };
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${META_WA_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+  async function _post(to) {
+    const payload = {
+      messaging_product: "whatsapp",
+      to: String(to),
+      text: { body: text?.slice(0, 3500) || "" },
+    };
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${META_WA_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    return resp;
+  }
+  // 1) Пытаемся отправить на нормальный waId (например 7702...)
+  let resp = await _post(toWaId);
   if (!resp.ok) {
     const body = await resp.text();
+    // Если Meta ругается на allow-list (#131030) — пробуем «казахский глюк» 78...
+    if (body.includes('"code":131030')) {
+      // вставляем '8' сразу после первой '7'
+      const alt = /^7\d+$/.test(toWaId) && !toWaId.startsWith('78')
+        ? ('78' + String(toWaId).slice(1))
+        : toWaId;
+      if (alt !== toWaId) {
+        const resp2 = await _post(alt);
+        if (!resp2.ok) {
+          const body2 = await resp2.text();
+          console.error("sendWA retry error", resp2.status, body2);
+        }
+        return resp2;
+      }
+    }
     console.error("sendWA error", resp.status, body);
   }
   return resp;

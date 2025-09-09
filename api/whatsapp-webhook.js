@@ -30,7 +30,7 @@ const LAST_OFFER_KEY = (id) => `wa:last_offer:${id}`; // { topic, ts }
 const COMBINE_MULTI_TOPICS = true;
 
 /* =========================
-   БЛОК УСЛУГ — ВСТАВЬ СВОЙ СПИСОК
+   БЛОК УСЛУГ — ВСТАВЬ СВОЙ СПИСОК 
    ========================= */
 const SERVICES_TEXT = `
 - логотип и стиль:

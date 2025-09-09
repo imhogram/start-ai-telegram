@@ -526,14 +526,22 @@ async function finalizeAndAck(waId, booking, contact, waProfileName, lang) {
   const city   = booking.city   || contact?.city   || "—";
   const sphere = booking.sphere || contact?.sphere || "—";
 
-  await notifyLead(waId, topic, name, city, sphere);
+  try {
+    await notifyLead(waId, topic, name, city, sphere);
+  } catch (e) {
+    console.error("finalizeAndAck: notifyLead failed", e);
+  }
 
-  // Обновляем липкий профиль, чтобы в следующих запросах не переспрашивать
+  // сохраняем «липкий» профиль
   await setContact(waId, { name, city, sphere });
 
-  // Очищаем только текущую заявку и last_offer (чтобы не слать дубли)
+  // чистим только текущую заявку и оффер (чтобы не плодить дубли)
   await clearBooking(waId);
   await clearLastOffer(waId);
+
+  if (process.env.DEBUG_WA_LEAD === "1") {
+    await sendWA(waId, `DEBUG: лид отправлен админу.\nТема: ${topic}\nИмя: ${name}\nГород: ${city}\nСфера: ${sphere}`);
+  }
 
   const txt = L.booked[lang] || L.booked.ru;
   await pushHistory(waId, "assistant", txt);
@@ -629,6 +637,11 @@ export default async function handler(req, res) {
           }
           continue;
         }
+        if (/^\/testlead\b/i.test(userText)) {
+          await notifyLead(waId, "Тестовая тема", "Тест Имя", "Тест Город", "Тест Сфера");
+          await sendWA(waId, "Тестовый лид отправлен админу (проверьте Telegram).");
+          continue;
+        }
 
         // Язык интерфейса
         const stored = await redis.get(LANG_KEY(waId));
@@ -639,12 +652,14 @@ export default async function handler(req, res) {
           await redis.set(LANG_KEY(waId), lang, { ex: 60 * 60 * 24 * 30 });
         }
 
-        // Приветствие на первое сообщение — без continue (дальше обработаем сам вопрос)
+        // Приветствие на первое сообщение — СТРОГО один ответ и выходим
         const historyBefore = await getHistory(waId);
         if (historyBefore.length === 0) {
           const hi = L.hi[lang] || L.hi.ru;
+          await pushHistory(waId, "user", userText || "[non-text]");
           await pushHistory(waId, "assistant", hi);
           await sendWA(waId, hi);
+          continue; // <— важное отличие: не даём LLM ответить второй раз
         }
 
         // Достаём слоты/контакт
@@ -677,7 +692,7 @@ export default async function handler(req, res) {
         }
 
         // ===== «УМНОЕ СОГЛАСИЕ» =====
-        const consentRe = /\b(давайте|давай|хочу|нужно|нужна|нужен|оформим|оформить|готов|интересует\s*консультац|поехали|запишите|записать|ну\s*да|ага|угу|ок|окей|ok|okey|хорошо|go|да|yes|иә|ия)\b/iu;
+        const consentRe = /\b(давайте|давай|хочу|оформи|оформите|оформить|готов|интересует\s*консультац|поехали|запишите|записать|ну\s*да|ага|угу|ок|окей|ok|okey|хорошо|go|да|yes|иә|ия)\b/iu;
         if (consentRe.test(userText)) {
           // тема — из last_offer или из последних реплик
           let topicToBook = null;
@@ -904,9 +919,24 @@ async function notifyLead(waId, topic, name, city, sphere) {
     `Город: ${city || "-"}\n` +
     `Сфера: ${sphere || "-"}\n` +
     `Источник: wa_id ${waId}`;
+
   if (adminId && process.env.TELEGRAM_BOT_TOKEN) {
-    await sendTG(adminId, msg);
+    try {
+      const resp = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: adminId, text: msg }),
+      });
+      if (!resp.ok) {
+        const body = await resp.text();
+        console.error("notifyLead TG error", resp.status, body);
+      } else {
+        console.log("notifyLead TG ok", { adminId });
+      }
+    } catch (e) {
+      console.error("notifyLead TG exception", e);
+    }
   } else {
-    console.log("[LEAD]", msg);
+    console.log("[LEAD-FALLBACK]", msg);
   }
 }

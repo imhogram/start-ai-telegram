@@ -622,7 +622,7 @@ export default async function handler(req, res) {
         await setBooking(waId, booking); // фиксируем найденные темы/имя в Redis
 
         // «Человек/оператор»
-        if (/\b(человек|оператор|менеджер|переключи|пригласи|call me|talk to human)\b/iu.test(userText)) {
+        if (/\b(человек|оператор|менеджер|специалист|переключи|позови|пригласи|call me|talk to human)\b/iu.test(userText)) {
           await notifyLead(waId, booking.topic || "Консультация", normalizeName(booking.name || waProfileName || "—"), booking.city || "—", booking.sphere || "—");
           await clearBooking(waId);
           await clearLastOffer(waId);

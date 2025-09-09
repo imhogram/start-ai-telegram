@@ -246,14 +246,22 @@ async function clearBooking(id) {
   await redis.del(BOOK_KEY(id));
 }
 
-/* Контакт (кэш 30 дней) — храним хотя бы имя профиля WA */
+/* Контакт (кэш 30 дней): храним name, city, sphere (липкий профиль) */
 async function getContact(id) {
   const v = await redis.get(CONTACT_KEY(id));
   if (!v) return null;
   try { return typeof v === "string" ? JSON.parse(v) : v; } catch { return null; }
 }
-async function setContact(id, { name }) {
-  await redis.set(CONTACT_KEY(id), JSON.stringify({ name: name || null }), { ex: 60 * 60 * 24 * 30 });
+async function setContact(id, { name, city, sphere }) {
+  await redis.set(
+    CONTACT_KEY(id),
+    JSON.stringify({
+      name: name || null,
+      city: city || null,
+      sphere: sphere || null,
+    }),
+    { ex: 60 * 60 * 24 * 30 }
+  );
 }
 async function clearContact(id) {
   await redis.del(CONTACT_KEY(id));
@@ -368,15 +376,18 @@ async function tryAutofillFrom(id, booking, userText, waProfileName) {
   return booking;
 }
 
-/* Проверки слотов */
-function hasAllBookingFields(b) {
+/* Проверки слотов (с учётом контактного профиля) */
+function hasAllBookingFields(b, contact) {
   const hasTopic = b.topic && b.topic.trim().length;
-  return !!(b && hasTopic && b.name && b.city && b.sphere);
+  const name   = b.name   || contact?.name;
+  const city   = b.city   || contact?.city;
+  const sphere = b.sphere || contact?.sphere;
+  return !!(hasTopic && name && city && sphere);
 }
-function decideNextStage(b) {
-  if (!b.name) return "name";
-  if (!b.city) return "city";
-  if (!b.sphere) return "sphere";
+function decideNextStage(b, contact) {
+  if (!b.name   && !contact?.name)   return "name";
+  if (!b.city   && !contact?.city)   return "city";
+  if (!b.sphere && !contact?.sphere) return "sphere";
   return null;
 }
 
@@ -507,6 +518,29 @@ function verifyMetaSignature(appSecret, signature, rawBody) {
 }
 
 /* =========================
+   ФИНАЛИЗАЦИЯ ЛИДА (единая)
+   ========================= */
+async function finalizeAndAck(waId, booking, contact, waProfileName, lang) {
+  const topic  = booking.topic || (await getLastOffer(waId))?.topic || "Консультация";
+  const name   = normalizeName(booking.name || contact?.name || waProfileName || "—");
+  const city   = booking.city   || contact?.city   || "—";
+  const sphere = booking.sphere || contact?.sphere || "—";
+
+  await notifyLead(waId, topic, name, city, sphere);
+
+  // Обновляем липкий профиль, чтобы в следующих запросах не переспрашивать
+  await setContact(waId, { name, city, sphere });
+
+  // Очищаем только текущую заявку и last_offer (чтобы не слать дубли)
+  await clearBooking(waId);
+  await clearLastOffer(waId);
+
+  const txt = L.booked[lang] || L.booked.ru;
+  await pushHistory(waId, "assistant", txt);
+  await sendWA(waId, txt);
+}
+
+/* =========================
    ОСНОВНОЙ ХЕНДЛЕР ДЛЯ VERCEL
    ========================= */
 export default async function handler(req, res) {
@@ -605,30 +639,40 @@ export default async function handler(req, res) {
           await redis.set(LANG_KEY(waId), lang, { ex: 60 * 60 * 24 * 30 });
         }
 
-        // Приветствие на первое сообщение
+        // Приветствие на первое сообщение — без continue (дальше обработаем сам вопрос)
         const historyBefore = await getHistory(waId);
         if (historyBefore.length === 0) {
           const hi = L.hi[lang] || L.hi.ru;
-          await pushHistory(waId, "user", userText || "[non-text]");
           await pushHistory(waId, "assistant", hi);
           await sendWA(waId, hi);
-          continue;
         }
 
         // Достаём слоты/контакт
         const booking = await getBooking(waId);
         const contact = (await getContact(waId)) || {};
         await tryAutofillFrom(waId, booking, userText, contact.name || waProfileName);
-        await setBooking(waId, booking); // фиксируем найденные темы/имя в Redis
+
+        // Подставляем недостающее из липкого профиля
+        if (!booking.name   && contact.name)   booking.name = contact.name;
+        if (!booking.city   && contact.city)   booking.city = contact.city;
+        if (!booking.sphere && contact.sphere) booking.sphere = contact.sphere;
+
+        await setBooking(waId, booking); // фиксируем найденное
 
         // «Человек/оператор»
         if (/\b(человек|оператор|менеджер|специалист|директор|переключи|позови|пригласи|call me|talk to human)\b/iu.test(userText)) {
-          await notifyLead(waId, booking.topic || "Консультация", normalizeName(booking.name || waProfileName || "—"), booking.city || "—", booking.sphere || "—");
+          // Даже если не все поля — отправим с тем, что есть
+          const topic  = booking.topic || (await getLastOffer(waId))?.topic || "Консультация";
+          const name   = normalizeName(booking.name || contact?.name || waProfileName || "—");
+          const city   = booking.city   || contact?.city   || "—";
+          const sphere = booking.sphere || contact?.sphere || "—";
+          await notifyLead(waId, topic, name, city, sphere);
+          await setContact(waId, { name, city, sphere }); // запомним профиль
           await clearBooking(waId);
           await clearLastOffer(waId);
-          await sendWA(waId, (lang === "kz") ? "Менеджерді шақырамын. Жақында хабарласамыз." :
-                         (lang === "en") ? "I’ll bring a manager in. We’ll reach out shortly." :
-                                           "Приглашаю менеджера. Скоро свяжемся.");
+          await sendWA(waId, (lang === "kz") ? "Менеджерді шақырамын. Жақында хабарласамыз."
+                         : (lang === "en") ? "I’ll bring a manager in. We’ll reach out shortly."
+                         : "Приглашаю менеджера. Скоро свяжемся.");
           continue;
         }
 
@@ -654,21 +698,13 @@ export default async function handler(req, res) {
             }
           }
           if (topicToBook) booking.topic = booking.topic || topicToBook;
-          // запрашиваем недостающие поля
-          const next = decideNextStage(booking);
-          if (!next && hasAllBookingFields(booking)) {
-            const name = normalizeName(booking.name || waProfileName || "—");
-            await notifyLead(waId, booking.topic, name, booking.city, booking.sphere);
-            await setContact(waId, { name });
-            await clearBooking(waId);
-            await clearLastOffer(waId);
-            const txt = L.booked[lang] || L.booked.ru;
-            await pushHistory(waId, "user", userText);
-            await pushHistory(waId, "assistant", txt);
-            await sendWA(waId, txt);
+
+          // запрашиваем недостающее
+          const next = decideNextStage(booking, contact);
+          if (!next && hasAllBookingFields(booking, contact)) {
+            await finalizeAndAck(waId, booking, contact, waProfileName, lang);
             continue;
           } else {
-            // спросим следующий слот
             booking.stage = next || "name";
             await setBooking(waId, booking);
             const prompt = (booking.stage === "name")
@@ -676,7 +712,6 @@ export default async function handler(req, res) {
               : (booking.stage === "city")
               ? (L.askCity[lang] || L.askCity.ru)
               : (L.askSphere[lang] || L.askSphere.ru);
-            await pushHistory(waId, "user", userText);
             await pushHistory(waId, "assistant", prompt);
             await sendWA(waId, prompt);
             continue;
@@ -688,19 +723,16 @@ export default async function handler(req, res) {
           const candidate = userText;
           if (isNameLike(candidate)) {
             booking.name = normalizeName(candidate);
-            // следующий вопрос
             booking.stage = "city";
             await setBooking(waId, booking);
             const prompt = L.askCity[lang] || L.askCity.ru;
-            await pushHistory(waId, "user", userText);
             await pushHistory(waId, "assistant", prompt);
             await sendWA(waId, prompt);
             continue;
           } else {
-            const prompt = (lang === "kz") ? "Есіміңізді әріптермен ғана жазыңыз (мыс.: Алина)." :
-                           (lang === "en") ? "Please send just your name (letters only)." :
-                                             "Пожалуйста, укажите только имя (например: Алина).";
-            await pushHistory(waId, "user", userText);
+            const prompt = (lang === "kz") ? "Есіміңізді әріптермен ғана жазыңыз (мыс.: Алина)."
+                           : (lang === "en") ? "Please send just your name (letters only)."
+                           : "Пожалуйста, укажите только имя (например: Алина).";
             await pushHistory(waId, "assistant", prompt);
             await sendWA(waId, prompt);
             continue;
@@ -712,7 +744,6 @@ export default async function handler(req, res) {
           booking.stage = "sphere";
           await setBooking(waId, booking);
           const prompt = L.askSphere[lang] || L.askSphere.ru;
-          await pushHistory(waId, "user", userText);
           await pushHistory(waId, "assistant", prompt);
           await sendWA(waId, prompt);
           continue;
@@ -731,20 +762,11 @@ export default async function handler(req, res) {
             }
           }
 
-          if (hasAllBookingFields(booking)) {
-            const name = normalizeName(booking.name || waProfileName || "—");
-            await notifyLead(waId, booking.topic, name, booking.city, booking.sphere);
-            await setContact(waId, { name });
-            await clearBooking(waId);
-            await clearLastOffer(waId);
-            const txt = L.booked[lang] || L.booked.ru;
-            await pushHistory(waId, "user", userText);
-            await pushHistory(waId, "assistant", txt);
-            await sendWA(waId, txt);
+          if (hasAllBookingFields(booking, contact)) {
+            await finalizeAndAck(waId, booking, contact, waProfileName, lang);
             continue;
           } else {
-            // что-то не хватило — спросим следующее поле
-            const next = decideNextStage(booking) || "name";
+            const next = decideNextStage(booking, contact) || "name";
             booking.stage = next;
             await setBooking(waId, booking);
             const prompt = (next === "name")
@@ -752,56 +774,51 @@ export default async function handler(req, res) {
               : (next === "city")
               ? (L.askCity[lang] || L.askCity.ru)
               : (L.askSphere[lang] || L.askSphere.ru);
-            await pushHistory(waId, "user", userText);
             await pushHistory(waId, "assistant", prompt);
             await sendWA(waId, prompt);
             continue;
           }
         }
 
-         // ==== Однострочная заявка: "Имя, Город, Сфера" ====
-         const inline = parseInlineLead(userText);
-         if (inline) {
-           booking.name = booking.name || inline.name;
-           booking.city = booking.city || inline.city;
-           booking.sphere = booking.sphere || inline.sphere;
-           if (!booking.topic) {
-              const tNow = guessTopicsAll(userText);
-              if (tNow.length) {
-                booking.topic = COMBINE_MULTI_TOPICS ? tNow.join(", ") : tNow[0];
-              } else {
-                const offer = await getLastOffer(waId);
-                booking.topic = (offer && offer.topic) || "Консультация";
-              }
+        // ==== Однострочная заявка: "Имя, Город, Сфера" ====
+        const inline = parseInlineLead(userText);
+        if (inline) {
+          booking.name = booking.name || inline.name;
+          booking.city = booking.city || inline.city;
+          booking.sphere = booking.sphere || inline.sphere;
+          if (!booking.topic) {
+            const tNow = guessTopicsAll(userText);
+            if (tNow.length) {
+              booking.topic = COMBINE_MULTI_TOPICS ? tNow.join(", ") : tNow[0];
+            } else {
+              const offer = await getLastOffer(waId);
+              booking.topic = (offer && offer.topic) || "Консультация";
             }
+          }
 
-           if (hasAllBookingFields(booking)) {
-             const name = normalizeName(booking.name || waProfileName || "—");
-             await notifyLead(waId, booking.topic, name, booking.city, booking.sphere);
-             await setContact(waId, { name });
-             await clearBooking(waId);
-             await clearLastOffer(waId);
-             const txt = L.booked[lang] || L.booked.ru;
-             await pushHistory(waId, "user", userText);
-             await pushHistory(waId, "assistant", txt);
-             await sendWA(waId, txt);
-             continue;
-           } else {
-             // спросим недостающее
-             const next = decideNextStage(booking) || "name";
-             booking.stage = next;
-             await setBooking(waId, booking);
-             const prompt = (next === "name")
-               ? (L.askOnlyName[lang] || L.askOnlyName.ru)
-               : (next === "city")
-               ? (L.askCity[lang] || L.askCity.ru)
-               : (L.askSphere[lang] || L.askSphere.ru);
-             await pushHistory(waId, "user", userText);
-             await pushHistory(waId, "assistant", prompt);
-             await sendWA(waId, prompt);
-             continue;
-           }
-         }
+          if (hasAllBookingFields(booking, contact)) {
+            await finalizeAndAck(waId, booking, contact, waProfileName, lang);
+            continue;
+          } else {
+            const next = decideNextStage(booking, contact) || "name";
+            booking.stage = next;
+            await setBooking(waId, booking);
+            const prompt = (next === "name")
+              ? (L.askOnlyName[lang] || L.askOnlyName.ru)
+              : (next === "city")
+              ? (L.askCity[lang] || L.askCity.ru)
+              : (L.askSphere[lang] || L.askSphere.ru);
+            await pushHistory(waId, "assistant", prompt);
+            await sendWA(waId, prompt);
+            continue;
+          }
+        }
+
+        // === Глобальный авто-финализатор: если уже всё есть — отправляем лид и выходим
+        if (hasAllBookingFields(booking, contact)) {
+          await finalizeAndAck(waId, booking, contact, waProfileName, lang);
+          continue;
+        }
 
         // ===== ИИ-ответ + мягкий оффер (без запуска слотов) =====
         const history = await getHistory(waId);
@@ -847,8 +864,7 @@ export default async function handler(req, res) {
           await setLastOffer(waId, topicLabel); // сохраняем всю строку тем
           booking.topic = topicLabel;
           await setBooking(waId, booking);
-        }
-          else if (!booking.stage && topicsNow.length === 0 && replyTopics.length === 1) {
+        } else if (!booking.stage && topicsNow.length === 0 && replyTopics.length === 1) {
           await setLastOffer(waId, replyTopics[0]);
         }
 
@@ -858,6 +874,7 @@ export default async function handler(req, res) {
                 : "All set. How else can I help?";
         }
 
+        // пишем историю по пользователю и ответу ассистента один раз
         await pushHistory(waId, "user", userText);
         await pushHistory(waId, "assistant", reply);
         await sendWA(waId, reply);

@@ -764,17 +764,18 @@ export default async function handler(req, res) {
     if (consentRe.test(userText)) {
       let topicToBook = null;
 
-      // 1) свежий last_offer
-      const offer = await getLastOffer(chatId);
-      const fresh = offer && (Date.now() - (offer.ts || 0) < 10 * 60 * 1000);
-      if (fresh && offer.topic) topicToBook = offer.topic;
-
-      // 2) если нет last_offer — из букинга/истории
-      if (!topicToBook) {
-        const pending = Array.isArray(booking.pendingTopics) ? booking.pendingTopics : [];
-        if (pending.length) {
-          topicToBook = COMBINE_MULTI_TOPICS ? pending.join(", ") : pending[0];
-        } else {
+      // 1) если уже есть накопленные темы — они главнее любого last_offer
+      const pending = Array.isArray(booking.pendingTopics) ? booking.pendingTopics : [];
+      if (pending.length) {
+        topicToBook = COMBINE_MULTI_TOPICS ? pending.join(", ") : pending[0];
+      } else {
+        // 2) иначе пытаемся взять свежий last_offer
+        const offer = await getLastOffer(chatId);
+        const fresh = offer && (Date.now() - (offer.ts || 0) < 10 * 60 * 1000);
+        if (fresh && offer.topic) topicToBook = offer.topic;
+      
+        // 3) если и этого нет — фолбэк из истории
+        if (!topicToBook) {
           const hist = await getHistory(chatId);
           const prevUser = [...hist].filter(h => h.role === "user").slice(-1)[0]?.content || "";
           const prevA    = [...hist].filter(h => h.role === "assistant").slice(-1)[0]?.content || "";
@@ -1017,8 +1018,12 @@ export default async function handler(req, res) {
     const canOffer = (now - (booking.offerCooldownTs || 0)) >= OFFER_COOLDOWN_MS;
 
     if (canOffer && !booking.stage && topicsNow.length > 0) {
-      const topicLabel = COMBINE_MULTI_TOPICS ? topicsNow.join(", ") : topicsNow[0];
-
+      // если к этому моменту уже накопили pendingTopics — используем их;
+      // иначе — берём темы из текущего сообщения
+      const havePending = Array.isArray(booking.pendingTopics) && booking.pendingTopics.length > 0;
+      const labelList   = havePending ? booking.pendingTopics : topicsNow;
+      const topicLabel  = COMBINE_MULTI_TOPICS ? labelList.join(", ") : labelList[0];
+      
       const offerLine = (contact && contact.phone)
         ? (
             lang === "ru"
@@ -1034,15 +1039,18 @@ export default async function handler(req, res) {
               ? `\n\nҚаласаңыз, ${topicLabel} бойынша консультацияға жазамын. Аты-жөніңіз бен Телефон нөміріңізді жазыңыз.`
               : `\n\nIf you want, I can arrange a consultation on: ${topicLabel}. You can send your Name and Phone.`
           );
-
+      
       reply = (reply || "").trim() + offerLine;
-
-      // фикс: НЕ пишем booking.topic тут; темы копятся в pendingTopics в tryAutofillFrom
-      await setLastOffer(chatId, topicsNow[0]);
-
-      // обновляем кулдаун
+      
+      // обновим last_offer по первой теме из labelList (если есть)
+      if (labelList.length) {
+        await setLastOffer(chatId, labelList[0]);
+      }
+      
+      // кулдаун
       booking.offerCooldownTs = now;
       await setBooking(chatId, booking);
+
     } else if (canOffer && !booking.stage && topicsNow.length === 0 && replyTopics.length === 1) {
       // Пользователь явно тему не назвал, но ассистент — да. Только обновим last_offer.
       await setLastOffer(chatId, replyTopics[0]);

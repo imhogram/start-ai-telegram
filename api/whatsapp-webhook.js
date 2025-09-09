@@ -619,6 +619,7 @@ export default async function handler(req, res) {
         const booking = await getBooking(waId);
         const contact = (await getContact(waId)) || {};
         await tryAutofillFrom(waId, booking, userText, contact.name || waProfileName);
+        await setBooking(waId, booking); // фиксируем найденные темы/имя в Redis
 
         // «Человек/оператор»
         if (/\b(человек|оператор|менеджер|переключи|пригласи|call me|talk to human)\b/iu.test(userText)) {
@@ -649,7 +650,7 @@ export default async function handler(req, res) {
             if (!picked.length && /(през(а|у|ку|ка)|презент(?![а-я]))/i.test(prevUser)) picked = ["Презентация проекта"];
             if (picked.length) {
               topicToBook = COMBINE_MULTI_TOPICS ? picked.join(", ") : picked[0];
-              await setLastOffer(waId, picked[0]);
+              await setLastOffer(waId, COMBINE_MULTI_TOPICS ? picked.join(", ") : picked[0]);
             }
           }
           if (topicToBook) booking.topic = booking.topic || topicToBook;
@@ -722,8 +723,14 @@ export default async function handler(req, res) {
           booking.stage = null;
           if (!booking.topic) {
             const topics = guessTopicsAll(userText);
-            booking.topic = topics.length ? (COMBINE_MULTI_TOPICS ? topics.join(", ") : topics[0]) : "Консультация";
+            if (topics.length) {
+              booking.topic = COMBINE_MULTI_TOPICS ? topics.join(", ") : topics[0];
+            } else {
+              const offer = await getLastOffer(waId);
+              booking.topic = (offer && offer.topic) || "Консультация";
+            }
           }
+
           if (hasAllBookingFields(booking)) {
             const name = normalizeName(booking.name || waProfileName || "—");
             await notifyLead(waId, booking.topic, name, booking.city, booking.sphere);
@@ -759,9 +766,15 @@ export default async function handler(req, res) {
            booking.city = booking.city || inline.city;
            booking.sphere = booking.sphere || inline.sphere;
            if (!booking.topic) {
-             const tNow = guessTopicsAll(userText);
-             booking.topic = tNow.length ? (COMBINE_MULTI_TOPICS ? tNow.join(", ") : tNow[0]) : (await getLastOffer(waId))?.topic || "Консультация";
-           }
+              const tNow = guessTopicsAll(userText);
+              if (tNow.length) {
+                booking.topic = COMBINE_MULTI_TOPICS ? tNow.join(", ") : tNow[0];
+              } else {
+                const offer = await getLastOffer(waId);
+                booking.topic = (offer && offer.topic) || "Консультация";
+              }
+            }
+
            if (hasAllBookingFields(booking)) {
              const name = normalizeName(booking.name || waProfileName || "—");
              await notifyLead(waId, booking.topic, name, booking.city, booking.sphere);
@@ -831,7 +844,7 @@ export default async function handler(req, res) {
          
           reply = (reply || "").trim() + (lang === "kz" ? kzLine : lang === "en" ? enLine : ruLine);
          
-          await setLastOffer(waId, topicsNow[0]);
+          await setLastOffer(waId, topicLabel); // сохраняем всю строку тем
           booking.topic = topicLabel;
           await setBooking(waId, booking);
         }

@@ -22,7 +22,7 @@ const LAST_TS_KEY = (chatId) => `last_ts:${chatId}`;       // unix ms
 
 // Настройки
 const COMBINE_MULTI_TOPICS = true;   // объединять темы в одну заявку
-const OFFER_COOLDOWN_MS = 60 * 1000; // кулдаун оффера (мягкое приглашение)
+const OFFER_COOLDOWN_MS = 75 * 1000; // кулдаун оффера (мягкое приглашение)
 const INACTIVITY_NUDGE_MS = 60 * 1000; // авто-напоминание при молчании
 
 // Локальный таймер на процесс (best-effort)

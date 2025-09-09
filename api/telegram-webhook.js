@@ -405,10 +405,6 @@ const TOPIC_PATTERNS = [
   { re: /(франшиз|franchise|франчайзи.?нг)/i, topic: "Франчайзинг" },
   { re: /(маркетолог|gtm|go.?to.?market|стратегия\s*продвижения)/i, topic: "Маркетинг/реклама" },
 ];
-
-// Маркеры, что пользователь переопределяет/отменяет прежние темы
-const NEGATE_RE = /\b(нет|не\s*нужн[оа]|не\s*надо|не\s*то|не\s*это|не\s*интересует|только|лишь|скорее|лучше)\b/iu;
-
 function guessTopicsAll(userText) {
   const u = (userText || "").toLowerCase();
   const set = new Set();
@@ -424,28 +420,19 @@ async function tryAutofillFrom(chatId, booking, userText) {
   const phoneHit = pickPhone(userText);
   if (!booking.phone && phoneHit && phoneOk(phoneHit)) booking.phone = phoneHit;
 
-  if (!Array.isArray(booking.pendingTopics)) booking.pendingTopics = [];
+  // новые темы
   const topicsHit = guessTopicsAll(userText);
+  if (!Array.isArray(booking.pendingTopics)) booking.pendingTopics = [];
+  const existing = new Set(booking.pendingTopics);
+  topicsHit.forEach(t => existing.add(t));
+  booking.pendingTopics = Array.from(existing).slice(0, 4); // ограничим до 4 тем
 
-  if (topicsHit.length) {
-    // Если пользователь отрицает/уточняет — заменяем список тем на новые
-    if (NEGATE_RE.test(userText)) {
-      booking.pendingTopics = Array.from(new Set(topicsHit));
-      booking.topic = null; // сбросим старую строковую тему
-    } else {
-      // Иначе — аккуратное накопление (дедупликация)
-      const set = new Set(booking.pendingTopics);
-      topicsHit.forEach(t => set.add(t));
-      booking.pendingTopics = Array.from(set);
-    }
-    // Синхронизируем booking.topic только если хотим объединять
-    if (COMBINE_MULTI_TOPICS) {
-      booking.topic = booking.pendingTopics.join(", ");
-    } else if (!booking.topic && booking.pendingTopics.length) {
-      booking.topic = booking.pendingTopics[0];
-    }
+  // topic (строка) держим синхронно (для обратной совместимости)
+  if (booking.pendingTopics.length > 1) {
+    booking.topic = COMBINE_MULTI_TOPICS ? booking.pendingTopics.join(", ") : booking.pendingTopics[0];
+  } else if (booking.pendingTopics.length === 1 && !booking.topic) {
+    booking.topic = booking.pendingTopics[0];
   }
-
   return booking;
 }
 
@@ -699,23 +686,6 @@ export default async function handler(req, res) {
     // Подхват из текущего сообщения (имя/тел/темы)
     await tryAutofillFrom(chatId, booking, userText);
 
-    // Если пользователь явным отрицанием заменил темы — мягко подтвердим переключение
-    if (NEGATE_RE.test(userText) && guessTopicsAll(userText).length) {
-      const newLabel = COMBINE_MULTI_TOPICS
-        ? Array.from(new Set(guessTopicsAll(userText))).join(", ")
-        : guessTopicsAll(userText)[0];
-   
-      const confirmSwitch =
-        lang === "kz"
-          ? `Түсіндім: ${newLabel} керек.`
-          : (lang === "en"
-              ? `Got it: focusing on ${newLabel}.`
-              : `Понял: переключаюсь на «${newLabel}».`);
-   
-      await sendTG(chatId, confirmSwitch);
-      await pushHistory(chatId, "assistant", confirmSwitch);
-    }
-
     // 0) Первое сообщение — фиксированное приветствие
     const historyBefore = await getHistory(chatId);
     if (historyBefore.length === 0) {
@@ -812,10 +782,9 @@ export default async function handler(req, res) {
       if (hasAllBookingFields(booking)) {
         const namestr  = normalizeName(booking.name);
         const phonestr = booking.phone;
-        const topicsStr =
-          (Array.isArray(booking.pendingTopics) && booking.pendingTopics.length)
-            ? (COMBINE_MULTI_TOPICS ? booking.pendingTopics.join(", ") : booking.pendingTopics[0])
-            : (booking.topic || "Консультация");
+        const topicsStr = (Array.isArray(booking.pendingTopics) && booking.pendingTopics.length)
+          ? (COMBINE_MULTI_TOPICS ? booking.pendingTopics.join(", ") : booking.pendingTopics[0])
+          : (booking.topic || "Консультация");
 
         await sendLead(chatId, topicsStr, namestr, phonestr);
         await setContact(chatId, { name: namestr, phone: phonestr });
@@ -843,10 +812,9 @@ export default async function handler(req, res) {
       if (contact && contact.name && contact.phone) {
         const namestr  = normalizeName(contact.name);
         const phonestr = contact.phone;
-        const topicsStr =
-          (Array.isArray(booking.pendingTopics) && booking.pendingTopics.length)
-            ? (COMBINE_MULTI_TOPICS ? booking.pendingTopics.join(", ") : booking.pendingTopics[0])
-            : (booking.topic || "Консультация");
+        const topicsStr = (Array.isArray(booking.pendingTopics) && booking.pendingTopics.length)
+          ? (COMBINE_MULTI_TOPICS ? booking.pendingTopics.join(", ") : booking.pendingTopics[0])
+          : (booking.topic || "Консультация");
 
         await sendLead(chatId, topicsStr, namestr, phonestr);
         booking.pendingTopics = [];
@@ -862,10 +830,9 @@ export default async function handler(req, res) {
         const phonestr = booking.phone || (contact && contact.phone);
 
         if (namestr && phonestr) {
-          const topicsStr =
-             (Array.isArray(booking.pendingTopics) && booking.pendingTopics.length)
-               ? (COMBINE_MULTI_TOPICS ? booking.pendingTopics.join(", ") : booking.pendingTopics[0])
-               : (booking.topic || "Консультация");
+          const topicsStr = (Array.isArray(booking.pendingTopics) && booking.pendingTopics.length)
+            ? (COMBINE_MULTI_TOPICS ? booking.pendingTopics.join(", ") : booking.pendingTopics[0])
+            : (booking.topic || "Консультация");
 
           await sendLead(chatId, topicsStr, namestr, phonestr);
           await setContact(chatId, { name: namestr, phone: phonestr });
@@ -896,10 +863,9 @@ export default async function handler(req, res) {
       if (contact && contact.phone && (booking.name || contact.name)) {
         const namestr  = normalizeName(booking.name || contact.name);
         const phonestr = contact.phone;
-        const topicsStr =
-          (Array.isArray(booking.pendingTopics) && booking.pendingTopics.length)
-            ? (COMBINE_MULTI_TOPICS ? booking.pendingTopics.join(", ") : booking.pendingTopics[0])
-            : (booking.topic || "Консультация");
+        const topicsStr = (Array.isArray(booking.pendingTopics) && booking.pendingTopics.length)
+          ? (COMBINE_MULTI_TOPICS ? booking.pendingTopics.join(", ") : booking.pendingTopics[0])
+          : (booking.topic || "Консультация");
 
         await sendLead(chatId, topicsStr, namestr, phonestr);
         await setContact(chatId, { name: namestr, phone: phonestr });
@@ -916,10 +882,9 @@ export default async function handler(req, res) {
         const phonestr = booking.phone;
 
         if (namestr && phonestr) {
-           const topicsStr =
-             (Array.isArray(booking.pendingTopics) && booking.pendingTopics.length)
-               ? (COMBINE_MULTI_TOPICS ? booking.pendingTopics.join(", ") : booking.pendingTopics[0])
-               : (booking.topic || "Консультация");
+          const topicsStr = (Array.isArray(booking.pendingTopics) && booking.pendingTopics.length)
+            ? (COMBINE_MULTI_TOPICS ? booking.pendingTopics.join(", ") : booking.pendingTopics[0])
+            : (booking.topic || "Консультация");
 
           await sendLead(chatId, topicsStr, namestr, phonestr);
           await setContact(chatId, { name: namestr, phone: phonestr });
@@ -986,33 +951,34 @@ export default async function handler(req, res) {
     if (!booking.offerCooldownTs) booking.offerCooldownTs = 0;
 
     // если есть новые темы от пользователя — обновим last_offer и при необходимости покажем оффер
-   if (!booking.stage && topicsNow.length > 0) {
-     const topicLabel = COMBINE_MULTI_TOPICS ? topicsNow.join(", ") : topicsNow[0];
-   
-     const offerLine = (contact && contact.phone)
-       ? (
-           lang === "ru"
-             ? `\n\nЕсли хотите, оформлю консультацию по теме: ${topicLabel}. Просто напишите «Да».`
-             : lang === "kz"
-             ? `\n\nҚаласаңыз, ${topicLabel} бойынша консультацияға жазамын. Жай ғана «Иә» деп жазыңыз.`
-             : `\n\nIf you want, I’ll arrange a consultation on: ${topicLabel}. Just reply “Yes”.`
-         )
-       : (
-           lang === "ru"
-             ? `\n\nЕсли хотите, оформлю консультацию по теме: ${topicLabel}. Для этого отправьте Имя и Телефон.`
-             : lang === "kz"
-             ? `\n\nҚаласаңыз, ${topicLabel} бойынша консультацияға жазамын. Аты-жөніңіз бен Телефон нөміріңізді жазыңыз.`
-             : `\n\nIf you want, I can arrange a consultation on: ${topicLabel}. You can send your Name and Phone.`
-         );
-   
-     reply = (reply || "").trim() + offerLine;
-   
-     // фикс: НЕ пишем booking.topic тут; темы копятся в pendingTopics в tryAutofillFrom
-     await setLastOffer(chatId, topicsNow[0]);
-     await setBooking(chatId, booking);
-   } else if (!booking.stage && topicsNow.length === 0 && replyTopics.length === 1) {
-     await setLastOffer(chatId, replyTopics[0]);
-   }
+    if (topicsNow.length > 0) {
+      const topicLabel = COMBINE_MULTI_TOPICS ? topicsNow.join(", ") : topicsNow[0];
+      await setLastOffer(chatId, topicsNow[0]);
+
+      // покажем оффер, если кулдаун прошёл
+      if (now - booking.offerCooldownTs > OFFER_COOLDOWN_MS) {
+        const hasContact = !!(contact && contact.phone);
+        const offerLine = hasContact
+          ? (lang === "kz"
+              ? `\n\nҚаласаңыз, ${topicLabel} бойынша консультацияға жазамын. Жай ғана «Иә» деп жазыңыз.`
+              : lang === "en"
+              ? `\n\nIf you want, I’ll arrange a consultation on: ${topicLabel}. Just reply “Yes”.`
+              : `\n\nЕсли хотите, оформлю консультацию по теме: ${topicLabel}. Просто напишите «Да».`)
+          : (lang === "kz"
+              ? `\n\nҚаласаңыз, ${topicLabel} бойынша консультацияға жазамын. Аты-жөніңіз бен Телефон нөміріңізді жазыңыз.`
+              : lang === "en"
+              ? `\n\nIf you want, I can arrange a consultation on: ${topicLabel}. You can send your Name and Phone.`
+              : `\n\nЕсли хотите, оформлю консультацию по теме: ${topicLabel}. Для этого отправьте Имя и Телефон.`);
+
+        reply = (reply || "").trim() + offerLine;
+        booking.topic = topicLabel; // фиксируем объединённую тему
+        booking.offerCooldownTs = now;
+        await setBooking(chatId, booking);
+      }
+    } else if (replyTopics.length === 1) {
+      // если ассистент упомянул одну явную тему — помним её для «Да»
+      await setLastOffer(chatId, replyTopics[0]);
+    }
 
     if (!reply || reply.trim().length < 3) {
       reply = (lang === "ru")
@@ -1059,3 +1025,5 @@ async function sendLead(chatId, topic, name, phone) {
     console.error("ADMIN_CHAT_ID is not set or empty");
   }
 }
+
+

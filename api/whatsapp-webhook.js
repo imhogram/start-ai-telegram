@@ -18,10 +18,10 @@ const redis = new Redis({
 const HISTORY_LEN = 8;
 
 // WhatsApp Cloud API
-const META_WA_TOKEN = process.env.META_WA_TOKEN; // постоянный токен (System User)
-const META_WA_PHONE_NUMBER_ID = process.env.META_WA_PHONE_NUMBER_ID; // номер WA (id)
-const META_WA_VERIFY_TOKEN = process.env.META_WA_VERIFY_TOKEN; // Verify Token для вебхука
-const META_APP_SECRET = process.env.META_APP_SECRET || ""; // подпись X-Hub-Signature-256 (рекомендуется)
+const META_WA_TOKEN = process.env.META_WA_TOKEN;
+const META_WA_PHONE_NUMBER_ID = process.env.META_WA_PHONE_NUMBER_ID;
+const META_WA_VERIFY_TOKEN = process.env.META_WA_VERIFY_TOKEN;
+const META_APP_SECRET = process.env.META_APP_SECRET || "";
 
 const LANG_KEY = (id) => `wa:lang:${id}`;
 const BOOK_KEY = (id) => `wa:book:${id}`;
@@ -230,7 +230,7 @@ async function pushHistory(id, role, content) {
   await redis.ltrim(`hist:${id}`, -HISTORY_LEN, -1);
 }
 
-/* Слоты заявки (WA-версия): name, city, sphere, topic */
+/* Слоты заявки (WA-версия): только name, city, sphere + topic */
 async function getBooking(id) {
   const val = await redis.get(BOOK_KEY(id));
   if (!val) return { stage: null, topic: null, name: null, city: null, sphere: null };
@@ -246,7 +246,7 @@ async function clearBooking(id) {
   await redis.del(BOOK_KEY(id));
 }
 
-/* Липкий контакт (кэш 30 дней) — сохраняем имя/город/сферу */
+/* Контакт (кэш 30 дней) — теперь храним name, city, sphere */
 async function getContact(id) {
   const v = await redis.get(CONTACT_KEY(id));
   if (!v) return null;
@@ -262,6 +262,9 @@ async function setContact(id, { name, city, sphere }) {
 async function clearContact(id) {
   await redis.del(CONTACT_KEY(id));
 }
+function isContactComplete(c) {
+  return !!(c && c.name && c.city && c.sphere);
+}
 
 /* Последнее предложение (для «умного да») */
 async function setLastOffer(id, topic) {
@@ -275,10 +278,6 @@ async function getLastOffer(id) {
 }
 async function clearLastOffer(id) {
   await redis.del(LAST_OFFER_KEY(id));
-}
-
-function isContactComplete(c) {
-  return !!(c && c.name && c.city && c.sphere);
 }
 
 /* Язык */
@@ -305,7 +304,7 @@ function confidentLangSwitch(text) {
   return null;
 }
 
-/* Имя */
+/* Имя (берём и из профиля), простая нормализация */
 function normalizeName(name) {
   if (!name) return name;
   let s = String(name).trim();
@@ -323,7 +322,7 @@ function isNameLike(t) {
   return /^[\p{L}-]+$/u.test(words.join(""));
 }
 
-/* Темы */
+/* Темы — как в TG */
 const TOPIC_PATTERNS = [
   { re: /(масштаб|growth|scale|стратегия\s*развития|позиционир(ование)?)/i, topic: "Масштабирование и стратегия развития" },
   { re: /(маркетинг(овый)?\s*анализ|анализ\s*рынка|целев(ая|ой)\s*аудитор|конкурент|ценообраз)/i, topic: "Маркетинговый анализ" },
@@ -352,7 +351,7 @@ function guessTopicsAll(userText) {
   return Array.from(set);
 }
 
-/* Парс «Имя, Город, Сфера» */
+/* «Имя, Город, Сфера» одной строкой */
 function parseInlineLead(text) {
   if (!text) return null;
   const parts = text.split(/[,\n;/]+/).map(s => s.trim()).filter(Boolean);
@@ -365,7 +364,7 @@ function parseInlineLead(text) {
   return null;
 }
 
-/* Автозаполнение из сообщения + профиля WA */
+/* Автозаполнение */
 async function tryAutofillFrom(id, booking, userText, waProfileName) {
   if (!booking.name && waProfileName && isNameLike(waProfileName)) {
     booking.name = normalizeName(waProfileName);
@@ -378,7 +377,7 @@ async function tryAutofillFrom(id, booking, userText, waProfileName) {
 
 /* Проверки слотов */
 function hasAllBookingFields(b) {
-  const hasTopic = b.topic && String(b.topic).trim().length > 0;
+  const hasTopic = b.topic && b.topic.trim().length;
   return !!(b && hasTopic && b.name && b.city && b.sphere);
 }
 function decideNextStage(b) {
@@ -430,7 +429,7 @@ const COMPANY_INFO = {
   site: "https://strateg.kz",
 };
 
-/* Системный промпт */
+/* Системный промпт под WA */
 const baseSystemPrompt = `
 Ты — ИИ-ассистент компании START (г. Астана).
 Кратко и по делу консультируй ТОЛЬКО по услугам из блока SERVICES_TEXT ниже, затем уместно предложи консультацию.
@@ -439,15 +438,33 @@ const baseSystemPrompt = `
 Если спрашивают про цены/сроки — отвечай, что расчёт индивидуальный после консультации.
 Адрес: ${COMPANY_INFO.address}. Телефон: ${COMPANY_INFO.phone}. Время работы: ${COMPANY_INFO.worktime}. Адрес сайта: ${COMPANY_INFO.site}.
 Полный перечень услуг: см. блок SERVICES_TEXT (используй ТОЛЬКО эти услуги).
+
+ВАЖНО:
+- Никогда не давай телефон/адрес/сайт проактивно. Дай их только если пользователь прямо попросил контакты.
+- Если это не первое сообщение ассистента в истории, не повторяй приветствие.
+- Если пользователь выражает согласие ("да", "нужно", "нужна", "хочу" и т.п.), не давай контакты — предложи оформить консультацию и жди, пока система спросит слоты (Имя/Город/Сфера) или подтвердит передачу менеджеру.
 `;
 
-/* Админ */
+/* Админ (уведомления) */
 function getAdminId() {
   const raw = (process.env.ADMIN_CHAT_ID || "").replace(/^[\'"]|[\'"]$/g, "");
   return raw;
 }
+async function sendTG(chatId, text) {
+  if (!process.env.TELEGRAM_BOT_TOKEN) return;
+  const resp = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text }),
+  });
+  if (!resp.ok) {
+    const body = await resp.text();
+    console.error("sendTG error", resp.status, body, "chat_id=", chatId);
+  }
+  return resp;
+}
 
-/* Отправка WA (с патчем "78") */
+/* Отправка WA-сообщений (с патчем на "8") */
 async function sendWA(toWaId, text) {
   const url = `https://graph.facebook.com/v20.0/${META_WA_PHONE_NUMBER_ID}/messages`;
   async function _post(to) {
@@ -498,79 +515,8 @@ function verifyMetaSignature(appSecret, signature, rawBody) {
   }
 }
 
-/* ===== Финализация лида (единая) ===== */
-async function notifyLead(waId, topic, name, city, sphere) {
-  const adminId = getAdminId();
-  const finalTopic = topic || "Консультация";
-  const finalName = normalizeName(name || "");
-  const msg =
-    `🆕 Лид из WhatsApp:\n` +
-    `Тема: ${finalTopic}\n` +
-    `Имя: ${finalName || "-"}\n` +
-    `Город: ${city || "-"}\n` +
-    `Сфера: ${sphere || "-"}\n` +
-    `Источник: wa_id ${waId}`;
-
-  if (adminId && process.env.TELEGRAM_BOT_TOKEN) {
-    try {
-      const resp = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: adminId, text: msg }),
-      });
-      if (!resp.ok) {
-        const body = await resp.text();
-        console.error("notifyLead TG error", resp.status, body);
-      } else {
-        console.log("notifyLead TG ok", { adminId });
-      }
-    } catch (e) {
-      console.error("notifyLead TG exception", e);
-    }
-  } else {
-    console.log("[LEAD-FALLBACK]", msg);
-  }
-}
-
-async function finalizeAndAck(waId, booking, contact, waProfileName, lang) {
-  const topic  = booking.topic || (await getLastOffer(waId))?.topic || "Консультация";
-  const name   = normalizeName(booking.name || contact?.name || waProfileName || "—");
-  const city   = booking.city   || contact?.city   || "—";
-  const sphere = booking.sphere || contact?.sphere || "—";
-
-  try {
-    await notifyLead(waId, topic, name, city, sphere);
-  } catch (e) {
-    console.error("finalizeAndAck: notifyLead failed", e);
-  }
-
-  // Липкий профиль (чтобы в следующей заявке не спрашивать заново)
-  await setContact(waId, { name, city, sphere });
-
-  // Чистим только текущую «заявку» + last_offer (контакт остаётся)
-  await clearBooking(waId);
-  await clearLastOffer(waId);
-
-  if (process.env.DEBUG_WA_LEAD === "1") {
-    await sendWA(waId, `DEBUG: лид отправлен админу.\nТема: ${topic}\nИмя: ${name}\nГород: ${city}\nСфера: ${sphere}`);
-  }
-
-  const txt = L.booked[lang] || L.booked.ru;
-  await pushHistory(waId, "assistant", txt);
-  await sendWA(waId, txt);
-}
-
-/* Хелпер: авто-финализация при наличии всех полей */
-async function maybeFinalize(waId, booking, contact, waProfileName, lang) {
-  if (hasAllBookingFields(booking)) {
-    await finalizeAndAck(waId, booking, contact, waProfileName, lang);
-    return true;
-  }
-  return false;
-}
-
 /* =========================
-   ОСНОВНОЙ ХЕНДЛЕР
+   ОСНОВНОЙ ХЕНДЛЕР ДЛЯ VERCEL
    ========================= */
 export default async function handler(req, res) {
   try {
@@ -608,7 +554,6 @@ export default async function handler(req, res) {
       return res.end(JSON.stringify({ ok: true }));
     }
 
-    // WA события приходят пачками
     for (const entry of update.entry) {
       const changes = entry.changes || [];
       for (const ch of changes) {
@@ -618,7 +563,6 @@ export default async function handler(req, res) {
 
         if (!messages.length) continue;
 
-        // Берём первое текстовое сообщение
         const msg = messages[0];
         const waId = msg.from;
         const waProfileName = contacts?.[0]?.profile?.name || null;
@@ -627,9 +571,9 @@ export default async function handler(req, res) {
         // Команды
         if (/^\/reset\b/i.test(userText)) {
           await redis.del(`hist:${waId}`);
-          await clearBooking(waId);
+          await redis.del(BOOK_KEY(waId));
+          await clearContact(waId);
           await clearLastOffer(waId);
-          // Контакт оставляем — он липкий
           const current = (await redis.get(LANG_KEY(waId))) || "ru";
           await redis.set(LANG_KEY(waId), current, { ex: 60 * 60 * 24 * 30 });
           await sendWA(waId, L.resetDone[current] || L.resetDone.ru);
@@ -637,6 +581,11 @@ export default async function handler(req, res) {
         }
         if (/^\/whoami\b/i.test(userText)) {
           await sendWA(waId, `wa_id: ${waId}`);
+          continue;
+        }
+        if (/^\/testlead\b/i.test(userText)) {
+          await notifyLead(waId, "Тестовая тема", "Тест Имя", "Тест Город", "Тест Сфера");
+          await sendWA(waId, "Тестовый лид отправлен админу (проверьте Telegram).");
           continue;
         }
         if (/^\/lang\b/i.test(userText)) {
@@ -655,20 +604,6 @@ export default async function handler(req, res) {
           }
           continue;
         }
-        // Диагностика состояния
-        if (/^\/state\b/i.test(userText)) {
-          const booking = await getBooking(waId);
-          const contact = await getContact(waId);
-          const offer = await getLastOffer(waId);
-          await sendWA(waId, `DEBUG state:\nbooking=${JSON.stringify(booking)}\ncontact=${JSON.stringify(contact)}\noffer=${JSON.stringify(offer)}`);
-          continue;
-        }
-        // Тестовый лид
-        if (/^\/testlead\b/i.test(userText)) {
-          await notifyLead(waId, "Тестовая тема", "Тест Имя", "Тест Город", "Тест Сфера");
-          await sendWA(waId, "Тестовый лид отправлен админу (проверьте Telegram).");
-          continue;
-        }
 
         // Язык интерфейса
         const stored = await redis.get(LANG_KEY(waId));
@@ -679,123 +614,99 @@ export default async function handler(req, res) {
           await redis.set(LANG_KEY(waId), lang, { ex: 60 * 60 * 24 * 30 });
         }
 
-        // Приветствие на первое сообщение — СТРОГО один ответ и выходим
+        // Приветствие на первое сообщение — НЕ выходим, обрабатываем это же сообщение
+        let firstTurn = false;
         const historyBefore = await getHistory(waId);
         if (historyBefore.length === 0) {
+          firstTurn = true;
           const hi = L.hi[lang] || L.hi.ru;
           await pushHistory(waId, "user", userText || "[non-text]");
           await pushHistory(waId, "assistant", hi);
           await sendWA(waId, hi);
-          continue; // важно: не даём LLM ответить второй раз
         }
 
-        // Достаём слоты/контакт
+        // Слоты/контакт
         const booking = await getBooking(waId);
         const contact = (await getContact(waId)) || {};
         await tryAutofillFrom(waId, booking, userText, contact.name || waProfileName);
-        await setBooking(waId, booking); // фиксация текущего состояния
-
-        // ===== ГЛОБАЛЬНАЯ автофинализация, если всё уже набрано (например, «Имя, Город, Сфера» одной строкой)
-        const inline = parseInlineLead(userText);
-        if (inline) {
-          booking.name = booking.name || inline.name;
-          booking.city = booking.city || inline.city;
-          booking.sphere = booking.sphere || inline.sphere;
-          if (!booking.topic) {
-            const tNow = guessTopicsAll(userText);
-            booking.topic = tNow.length ? (COMBINE_MULTI_TOPICS ? tNow.join(", ") : tNow[0]) : (await getLastOffer(waId))?.topic || "Консультация";
-          }
-          await setBooking(waId, booking);
-          if (await maybeFinalize(waId, booking, contact, waProfileName, lang)) continue;
-        } else {
-          // даже без inline — если поля уже накопились ранее, финализируем
-          if (await maybeFinalize(waId, booking, contact, waProfileName, lang)) continue;
-        }
+        await setBooking(waId, booking);
 
         // «Человек/оператор»
         if (/\b(человек|оператор|менеджер|специалист|директор|переключи|позови|пригласи|call me|talk to human)\b/iu.test(userText)) {
-          // если темы нет — подхватим из последнего оффера
-          if (!booking.topic) {
-            const offer = await getLastOffer(waId);
-            booking.topic = (offer && offer.topic) || "Консультация";
+          if (contact?.name && !booking.name) booking.name = contact.name;
+          if (contact?.city && !booking.city) booking.city = contact.city;
+          if (contact?.sphere && !booking.sphere) booking.sphere = contact.sphere;
+          await setBooking(waId, booking);
+          const name = normalizeName(booking.name || waProfileName || "—");
+          await notifyLead(waId, booking.topic || "Консультация", name, booking.city || "—", booking.sphere || "—");
+          await clearBooking(waId);
+          await clearLastOffer(waId);
+          await sendWA(waId, (lang === "kz") ? "Менеджерді шақырамын. Жақында хабарласамыз." :
+                         (lang === "en") ? "I’ll bring a manager in. We’ll reach out shortly." :
+                                           "Приглашаю менеджера. Скоро свяжемся.");
+          continue;
+        }
+
+        // ===== «УМНОЕ СОГЛАСИЕ» =====
+        const consentRe = /\b(давайте|давай|хочу|нужно|нужна|нужен|оформим|оформить|готов|интересует\s*консультац|поехали|запишите|записать|ну\s*да|ага|угу|ок|окей|ok|okey|хорошо|go|да|yes|иә|ия|я\s*уже\s*писал|уже\s*писал|я\s*писал|я\s*отправлял|уже\s*отправлял|данные\s*есть|те\s*же\s*данные|можно\s*те\s*же|как\s*(ранее|раньше|в\s*прошлый\s*раз))\b/iu;
+        if (consentRe.test(userText)) {
+          let topicToBook = null;
+          const offer = await getLastOffer(waId);
+          const fresh = offer && (Date.now() - (offer.ts || 0) < 10 * 60 * 1000);
+          if (fresh && offer.topic) topicToBook = offer.topic;
+          if (!topicToBook) {
+            const hist = await getHistory(waId);
+            const prevUser = [...hist].filter(h => h.role === "user").slice(-1)[0]?.content || "";
+            const prevA    = [...hist].filter(h => h.role === "assistant").slice(-1)[0]?.content || "";
+            const fromUser = guessTopicsAll(prevUser);
+            const fromA    = guessTopicsAll(prevA);
+            let picked     = (fromUser.length ? fromUser : fromA);
+            if (!picked.length && /(през(а|у|ку|ка)|презент(?![а-я]))/i.test(prevUser)) picked = ["Презентация проекта"];
+            if (picked.length) {
+              topicToBook = COMBINE_MULTI_TOPICS ? picked.join(", ") : picked[0];
+              await setLastOffer(waId, topicToBook);
+            }
           }
+          if (topicToBook && !booking.topic) booking.topic = topicToBook;
+
+          // подставляем сохранённый контакт
           if (contact?.name && !booking.name) booking.name = contact.name;
           if (contact?.city && !booking.city) booking.city = contact.city;
           if (contact?.sphere && !booking.sphere) booking.sphere = contact.sphere;
           await setBooking(waId, booking);
 
-          await finalizeAndAck(waId, booking, contact, waProfileName, lang);
+          if (await maybeFinalize(waId, booking, contact, waProfileName, lang)) continue;
+
+          const next = decideNextStage(booking) || "name";
+          booking.stage = next;
+          await setBooking(waId, booking);
+          const prompt = (next === "name")
+            ? (L.askOnlyName[lang] || L.askOnlyName.ru)
+            : (next === "city")
+            ? (L.askCity[lang] || L.askCity.ru)
+            : (L.askSphere[lang] || L.askSphere.ru);
+          await pushHistory(waId, "user", userText);
+          await pushHistory(waId, "assistant", prompt);
+          await sendWA(waId, prompt);
           continue;
         }
 
-        // ===== «УМНОЕ СОГЛАСИЕ» =====
-         const consentRe = /\b(давайте|давай|хочу|нужно|нужна|нужен|оформим|оформить|готов|интересует\s*консультац|поехали|запишите|записать|ну\s*да|ага|угу|ок|окей|ok|okey|хорошо|go|да|yes|иә|ия|я\s*уже\s*писал|уже\s*писал|я\s*писал|я\s*отправлял|уже\s*отправлял|данные\s*есть|те\s*же\s*данные|можно\s*те\s*же|как\s*(ранее|раньше|в\s*прошлый\s*раз))\b/iu;
-         if (consentRe.test(userText)) {
-           // Тема — из last_offer или из последних реплик
-           let topicToBook = null;
-           const offer = await getLastOffer(waId);
-           const fresh = offer && (Date.now() - (offer.ts || 0) < 10 * 60 * 1000);
-           if (fresh && offer.topic) topicToBook = offer.topic;
-           if (!topicToBook) {
-             const hist = await getHistory(waId);
-             const prevUser = [...hist].filter(h => h.role === "user").slice(-1)[0]?.content || "";
-             const prevA    = [...hist].filter(h => h.role === "assistant").slice(-1)[0]?.content || "";
-             const fromUser = guessTopicsAll(prevUser);
-             const fromA    = guessTopicsAll(prevA);
-             let picked     = (fromUser.length ? fromUser : fromA);
-             if (!picked.length && /(през(а|у|ку|ка)|презент(?![а-я]))/i.test(prevUser)) picked = ["Презентация проекта"];
-             if (picked.length) {
-               topicToBook = COMBINE_MULTI_TOPICS ? picked.join(", ") : picked[0];
-               await setLastOffer(waId, topicToBook);
-             }
-           }
-           if (topicToBook && !booking.topic) {
-             booking.topic = topicToBook;
-           }
-         
-           // 🔥 ключевое: если контакт уже известен — подставляем его в слоты
-           if (contact?.name && !booking.name) booking.name = contact.name;
-           if (contact?.city && !booking.city) booking.city = contact.city;
-           if (contact?.sphere && !booking.sphere) booking.sphere = contact.sphere;
-           await setBooking(waId, booking);
-         
-           // если уже всё собрано — финализируем
-           if (await maybeFinalize(waId, booking, contact, waProfileName, lang)) continue;
-         
-           // иначе спрашиваем следующий недостающий слот
-           const next = decideNextStage(booking) || "name";
-           booking.stage = next;
-           await setBooking(waId, booking);
-           const prompt = (next === "name")
-             ? (L.askOnlyName[lang] || L.askOnlyName.ru)
-             : (next === "city")
-             ? (L.askCity[lang] || L.askCity.ru)
-             : (L.askSphere[lang] || L.askSphere.ru);
-           await pushHistory(waId, "user", userText);
-           await pushHistory(waId, "assistant", prompt);
-           await sendWA(waId, prompt);
-           continue;
-         }
-
-
-        // Обработка стадий (после каждого шага — автофинализация)
+        // Обработка стадий
         if (booking.stage === "name") {
           const candidate = userText;
           if (isNameLike(candidate)) {
             booking.name = normalizeName(candidate);
             booking.stage = "city";
             await setBooking(waId, booking);
-            // вдруг уже всё есть?
-            if (await maybeFinalize(waId, booking, contact, waProfileName, lang)) continue;
             const prompt = L.askCity[lang] || L.askCity.ru;
             await pushHistory(waId, "user", userText);
             await pushHistory(waId, "assistant", prompt);
             await sendWA(waId, prompt);
             continue;
           } else {
-            const prompt = (lang === "kz") ? "Есіміңізді әріптермен ғана жазыңыз (мыс.: Алина)."
-                         : (lang === "en") ? "Please send just your name (letters only)."
-                         : "Пожалуйста, укажите только имя (например: Алина).";
+            const prompt = (lang === "kz") ? "Есіміңізді әріптермен ғана жазыңыз (мыс.: Алина)." :
+                           (lang === "en") ? "Please send just your name (letters only)." :
+                                             "Пожалуйста, укажите только имя (например: Алина).";
             await pushHistory(waId, "user", userText);
             await pushHistory(waId, "assistant", prompt);
             await sendWA(waId, prompt);
@@ -807,7 +718,6 @@ export default async function handler(req, res) {
           booking.city = userText.trim().slice(0, 100);
           booking.stage = "sphere";
           await setBooking(waId, booking);
-          if (await maybeFinalize(waId, booking, contact, waProfileName, lang)) continue;
           const prompt = L.askSphere[lang] || L.askSphere.ru;
           await pushHistory(waId, "user", userText);
           await pushHistory(waId, "assistant", prompt);
@@ -827,10 +737,11 @@ export default async function handler(req, res) {
               booking.topic = (offer && offer.topic) || "Консультация";
             }
           }
-          await setBooking(waId, booking);
+
+          // пробуем финализировать на известных данных
           if (await maybeFinalize(waId, booking, contact, waProfileName, lang)) continue;
 
-          // если почему-то не хватает чего-то — спросим недостающее
+          // иначе спросим недостающее
           const next = decideNextStage(booking) || "name";
           booking.stage = next;
           await setBooking(waId, booking);
@@ -845,10 +756,38 @@ export default async function handler(req, res) {
           continue;
         }
 
-        // ===== ИИ-ответ + мягкий оффер (без запуска слотов)
-        // (перед LLM-проходом ещё раз попробуем финализировать — на случай гонок)
-        if (await maybeFinalize(waId, booking, contact, waProfileName, lang)) continue;
+        // ==== Однострочная заявка
+        const inline = parseInlineLead(userText);
+        if (inline) {
+          booking.name = booking.name || inline.name;
+          booking.city = booking.city || inline.city;
+          booking.sphere = booking.sphere || inline.sphere;
+          if (!booking.topic) {
+            const tNow = guessTopicsAll(userText);
+            if (tNow.length) {
+              booking.topic = COMBINE_MULTI_TOPICS ? tNow.join(", ") : tNow[0];
+            } else {
+              const offer = await getLastOffer(waId);
+              booking.topic = (offer && offer.topic) || "Консультация";
+            }
+          }
+          if (await maybeFinalize(waId, booking, contact, waProfileName, lang)) continue;
 
+          const next = decideNextStage(booking) || "name";
+          booking.stage = next;
+          await setBooking(waId, booking);
+          const prompt = (next === "name")
+            ? (L.askOnlyName[lang] || L.askOnlyName.ru)
+            : (next === "city")
+            ? (L.askCity[lang] || L.askCity.ru)
+            : (L.askSphere[lang] || L.askSphere.ru);
+          await pushHistory(waId, "user", userText);
+          await pushHistory(waId, "assistant", prompt);
+          await sendWA(waId, prompt);
+          continue;
+        }
+
+        // ===== ИИ-ответ + мягкий оффер
         const history = await getHistory(waId);
         const languageLine = lang === "ru"
           ? "Отвечай на русском языке."
@@ -861,6 +800,8 @@ export default async function handler(req, res) {
         const messagesToLLM = [
           { role: "system", content: systemPrompt },
           ...history,
+          // важно: если это был первый ход, в истории уже есть наше приветствие,
+          // поэтому LLM не должен повторять его
           { role: "user", content: userText },
         ];
         const completion = await openai.chat.completions.create({
@@ -870,49 +811,45 @@ export default async function handler(req, res) {
         });
         let reply = completion.choices?.[0]?.message?.content?.slice(0, 3500) || "";
 
-        // мягкий оффер с фиксацией last_offer
         const topicsNow = guessTopicsAll(userText);
-         const replyTopics = guessTopicsAll(reply);
-         
-         if (!booking.stage && topicsNow.length > 0) {
-           const topicLabel = COMBINE_MULTI_TOPICS ? topicsNow.join(", ") : topicsNow[0];
-           const plural = (topicsNow.length > 1);
-         
-           // если контакт полный — меняем формулировку
-           const haveContact = isContactComplete(contact);
-         
-           const ruLine = haveContact
-             ? `\n\nУ меня уже есть ваши Имя, Город и Сфера. Передать менеджеру по теме: ${topicLabel}? Если да — напишите «Да».`
-             : (plural
-                 ? `\n\nЕсли хотите, подготовлю консультацию по темам: ${topicLabel}. Для этого пришлите Имя, Город и Сферу деятельности.`
-                 : `\n\nЕсли хотите, подготовлю консультацию по теме: ${topicLabel}. Для этого пришлите Имя, Город и Сферу деятельности.`);
-         
-           const kzLine = haveContact
-             ? `\n\nСіз туралы Имя, Қала және Сфера мәліметтері бар. ${topicLabel} тақырыбы бойынша менеджерге жіберейін бе? Иә десеңіз — «Иә» деп жазыңыз.`
-             : (plural
-                 ? `\n\nҚаласаңыз, келесі тақырыптар бойынша консультация дайындаймын: ${topicLabel}. Ол үшін Атыңызды, Қалаңызды және Сфераңызды жазыңыз.`
-                 : `\n\nҚаласаңыз, ${topicLabel} бойынша консультация дайындаймын. Ол үшін Атыңызды, Қалаңызды және Сфераңызды жазыңыз.`);
-         
-           const enLine = haveContact
-             ? `\n\nI already have your Name, City and Field. Should I pass this to a manager about: ${topicLabel}? If yes — reply “Yes”.`
-             : (plural
-                 ? `\n\nIf you want, I’ll arrange a consultation on these topics: ${topicLabel}. Please send your Name, City and Business field.`
-                 : `\n\nIf you want, I’ll arrange a consultation on: ${topicLabel}. Please send your Name, City and Business field.`);
-         
-           reply = (reply || "").trim() + (lang === "kz" ? kzLine : lang === "en" ? enLine : ruLine);
-         
-           await setLastOffer(waId, topicLabel);
-           // сохраним тему в booking; если контакт полный — сразу подставим его, чтобы далее сработала автофинализация
-           booking.topic = topicLabel;
-           if (haveContact) {
-             if (!booking.name)   booking.name   = contact.name;
-             if (!booking.city)   booking.city   = contact.city;
-             if (!booking.sphere) booking.sphere = contact.sphere;
-           }
-           await setBooking(waId, booking);
-         } else if (!booking.stage && topicsNow.length === 0 && replyTopics.length === 1) {
-           await setLastOffer(waId, replyTopics[0]);
-         }
+        const replyTopics = guessTopicsAll(reply);
+
+        if (!booking.stage && topicsNow.length > 0) {
+          const topicLabel = COMBINE_MULTI_TOPICS ? topicsNow.join(", ") : topicsNow[0];
+          const plural = (topicsNow.length > 1);
+          const haveContact = isContactComplete(contact);
+
+          const ruLine = haveContact
+            ? `\n\nУ меня уже есть ваши Имя, Город и Сфера. Передать менеджеру по теме: ${topicLabel}? Если да — напишите «Да».`
+            : (plural
+              ? `\n\nЕсли хотите, подготовлю консультацию по темам: ${topicLabel}. Для этого пришлите Имя, Город и Сферу деятельности.`
+              : `\n\nЕсли хотите, подготовлю консультацию по теме: ${topicLabel}. Для этого пришлите Имя, Город и Сферу деятельности.`);
+
+          const kzLine = haveContact
+            ? `\n\nСіз туралы Имя, Қала және Сфера мәліметтері бар. ${topicLabel} тақырыбы бойынша менеджерге жіберейін бе? Иә десеңіз — «Иә» деп жазыңыз.`
+            : (plural
+              ? `\n\nҚаласаңыз, келесі тақырыптар бойынша консультация дайындаймын: ${topicLabel}. Ол үшін Атыңызды, Қалаңызды және Сфераңызды жазыңыз.`
+              : `\n\nҚаласаңыз, ${topicLabel} бойынша консультация дайындаймын. Ол үшін Атыңызды, Қалаңызды және Сфераңызды жазыңыз.`);
+
+          const enLine = haveContact
+            ? `\n\nI already have your Name, City and Field. Should I pass this to a manager about: ${topicLabel}? If yes — reply “Yes”.`
+            : (plural
+              ? `\n\nIf you want, I’ll arrange a consultation on these topics: ${topicLabel}. Please send your Name, City and Business field.`
+              : `\n\nIf you want, I’ll arrange a consultation on: ${topicLabel}. Please send your Name, City and Business field.`);
+
+          reply = (reply || "").trim() + (lang === "kz" ? kzLine : lang === "en" ? enLine : ruLine);
+
+          await setLastOffer(waId, topicLabel);
+          booking.topic = topicLabel;
+          if (haveContact) {
+            if (!booking.name)   booking.name   = contact.name;
+            if (!booking.city)   booking.city   = contact.city;
+            if (!booking.sphere) booking.sphere = contact.sphere;
+          }
+          await setBooking(waId, booking);
+        } else if (!booking.stage && topicsNow.length === 0 && replyTopics.length === 1) {
+          await setLastOffer(waId, replyTopics[0]);
+        }
 
         if (!reply || reply.trim().length < 3) {
           reply = (lang === "ru") ? "Готово. Чем ещё помочь?"
@@ -935,3 +872,47 @@ export default async function handler(req, res) {
   }
 }
 
+/* =========================
+   ХЕЛПЕР ФИНАЛИЗАЦИИ
+   ========================= */
+async function maybeFinalize(waId, booking, contact, waProfileName, lang) {
+  const haveContact = isContactComplete(contact);
+  const topic = booking.topic;
+  const name = normalizeName(booking.name || (haveContact ? contact.name : waProfileName) || "—");
+  const city = booking.city || (haveContact ? contact.city : null);
+  const sphere = booking.sphere || (haveContact ? contact.sphere : null);
+
+  if (topic && name && city && sphere) {
+    await notifyLead(waId, topic, name, city, sphere);
+    await setContact(waId, { name, city, sphere }); // кэшируем для будущих заявок
+    await clearBooking(waId);
+    await clearLastOffer(waId);
+    const txt = L.booked[lang] || L.booked.ru;
+    await pushHistory(waId, "assistant", txt);
+    await sendWA(waId, txt);
+    return true;
+  }
+  return false;
+}
+
+/* =========================
+   ВСПОМОГАТЕЛЬНОЕ: отправка лида админу
+   ========================= */
+async function notifyLead(waId, topic, name, city, sphere) {
+  const adminId = getAdminId();
+  const finalTopic = topic || "Консультация";
+  const finalName = normalizeName(name || "");
+  const msg =
+    `🆕 Лид из WhatsApp:\n` +
+    `Тема: ${finalTopic}\n` +
+    `Имя: ${finalName || "-"}\n` +
+    `Город: ${city || "-"}\n` +
+    `Сфера: ${sphere || "-"}\n` +
+    `Источник: wa_id ${waId}`;
+  if (adminId && process.env.TELEGRAM_BOT_TOKEN) {
+    const r = await sendTG(adminId, msg);
+    if (!r || !r.ok) console.error("[LEAD->TG] send error");
+  } else {
+    console.log("[LEAD]", msg);
+  }
+}

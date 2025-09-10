@@ -277,6 +277,10 @@ async function clearLastOffer(id) {
   await redis.del(LAST_OFFER_KEY(id));
 }
 
+function isContactComplete(c) {
+  return !!(c && c.name && c.city && c.sphere);
+}
+
 /* Язык */
 function detectLang(text) {
   if (!text) return "ru";
@@ -715,52 +719,64 @@ export default async function handler(req, res) {
             const offer = await getLastOffer(waId);
             booking.topic = (offer && offer.topic) || "Консультация";
           }
+          if (contact?.name && !booking.name) booking.name = contact.name;
+          if (contact?.city && !booking.city) booking.city = contact.city;
+          if (contact?.sphere && !booking.sphere) booking.sphere = contact.sphere;
+          await setBooking(waId, booking);
+
           await finalizeAndAck(waId, booking, contact, waProfileName, lang);
           continue;
         }
 
         // ===== «УМНОЕ СОГЛАСИЕ» =====
-        const consentRe = /\b(давайте|давай|хочу|нужно|нужна|нужен|оформим|оформить|готов|интересует\s*консультац|поехали|запишите|записать|ну\s*да|ага|угу|ок|окей|ok|okey|хорошо|go|да|yes|иә|ия)\b/iu;
-        if (consentRe.test(userText)) {
-          // Тема — из last_offer или из последних реплик
-          let topicToBook = null;
-          const offer = await getLastOffer(waId);
-          const fresh = offer && (Date.now() - (offer.ts || 0) < 10 * 60 * 1000);
-          if (fresh && offer.topic) topicToBook = offer.topic;
-          if (!topicToBook) {
-            const hist = await getHistory(waId);
-            const prevUser = [...hist].filter(h => h.role === "user").slice(-1)[0]?.content || "";
-            const prevA    = [...hist].filter(h => h.role === "assistant").slice(-1)[0]?.content || "";
-            const fromUser = guessTopicsAll(prevUser);
-            const fromA    = guessTopicsAll(prevA);
-            let picked     = (fromUser.length ? fromUser : fromA);
-            if (!picked.length && /(през(а|у|ку|ка)|презент(?![а-я]))/i.test(prevUser)) picked = ["Презентация проекта"];
-            if (picked.length) {
-              topicToBook = COMBINE_MULTI_TOPICS ? picked.join(", ") : picked[0];
-              await setLastOffer(waId, topicToBook);
-            }
-          }
-          if (topicToBook && !booking.topic) {
-            booking.topic = topicToBook;
-            await setBooking(waId, booking);
-          }
-          // если уже всё собрано — финализируем сразу
-          if (await maybeFinalize(waId, booking, contact, waProfileName, lang)) continue;
+         const consentRe = /\b(давайте|давай|хочу|нужно|нужна|нужен|оформим|оформить|готов|интересует\s*консультац|поехали|запишите|записать|ну\s*да|ага|угу|ок|окей|ok|okey|хорошо|go|да|yes|иә|ия|я\s*уже\s*писал|уже\s*писал|я\s*писал|я\s*отправлял|уже\s*отправлял|данные\s*есть|те\s*же\s*данные|можно\s*те\s*же|как\s*(ранее|раньше|в\s*прошлый\s*раз))\b/iu;
+         if (consentRe.test(userText)) {
+           // Тема — из last_offer или из последних реплик
+           let topicToBook = null;
+           const offer = await getLastOffer(waId);
+           const fresh = offer && (Date.now() - (offer.ts || 0) < 10 * 60 * 1000);
+           if (fresh && offer.topic) topicToBook = offer.topic;
+           if (!topicToBook) {
+             const hist = await getHistory(waId);
+             const prevUser = [...hist].filter(h => h.role === "user").slice(-1)[0]?.content || "";
+             const prevA    = [...hist].filter(h => h.role === "assistant").slice(-1)[0]?.content || "";
+             const fromUser = guessTopicsAll(prevUser);
+             const fromA    = guessTopicsAll(prevA);
+             let picked     = (fromUser.length ? fromUser : fromA);
+             if (!picked.length && /(през(а|у|ку|ка)|презент(?![а-я]))/i.test(prevUser)) picked = ["Презентация проекта"];
+             if (picked.length) {
+               topicToBook = COMBINE_MULTI_TOPICS ? picked.join(", ") : picked[0];
+               await setLastOffer(waId, topicToBook);
+             }
+           }
+           if (topicToBook && !booking.topic) {
+             booking.topic = topicToBook;
+           }
+         
+           // 🔥 ключевое: если контакт уже известен — подставляем его в слоты
+           if (contact?.name && !booking.name) booking.name = contact.name;
+           if (contact?.city && !booking.city) booking.city = contact.city;
+           if (contact?.sphere && !booking.sphere) booking.sphere = contact.sphere;
+           await setBooking(waId, booking);
+         
+           // если уже всё собрано — финализируем
+           if (await maybeFinalize(waId, booking, contact, waProfileName, lang)) continue;
+         
+           // иначе спрашиваем следующий недостающий слот
+           const next = decideNextStage(booking) || "name";
+           booking.stage = next;
+           await setBooking(waId, booking);
+           const prompt = (next === "name")
+             ? (L.askOnlyName[lang] || L.askOnlyName.ru)
+             : (next === "city")
+             ? (L.askCity[lang] || L.askCity.ru)
+             : (L.askSphere[lang] || L.askSphere.ru);
+           await pushHistory(waId, "user", userText);
+           await pushHistory(waId, "assistant", prompt);
+           await sendWA(waId, prompt);
+           continue;
+         }
 
-          // иначе спрашиваем следующий недостающий слот
-          const next = decideNextStage(booking) || "name";
-          booking.stage = next;
-          await setBooking(waId, booking);
-          const prompt = (next === "name")
-            ? (L.askOnlyName[lang] || L.askOnlyName.ru)
-            : (next === "city")
-            ? (L.askCity[lang] || L.askCity.ru)
-            : (L.askSphere[lang] || L.askSphere.ru);
-          await pushHistory(waId, "user", userText);
-          await pushHistory(waId, "assistant", prompt);
-          await sendWA(waId, prompt);
-          continue;
-        }
 
         // Обработка стадий (после каждого шага — автофинализация)
         if (booking.stage === "name") {
@@ -856,29 +872,47 @@ export default async function handler(req, res) {
 
         // мягкий оффер с фиксацией last_offer
         const topicsNow = guessTopicsAll(userText);
-        const replyTopics = guessTopicsAll(reply);
-
-        if (!booking.stage && topicsNow.length > 0) {
-          const topicLabel = COMBINE_MULTI_TOPICS ? topicsNow.join(", ") : topicsNow[0];
-          const plural = (topicsNow.length > 1);
-          const ruLine = plural
-            ? `\n\nЕсли хотите, подготовлю консультацию по темам: ${topicLabel}. Для этого пришлите Имя, Город и Сферу деятельности.`
-            : `\n\nЕсли хотите, подготовлю консультацию по теме: ${topicLabel}. Для этого пришлите Имя, Город и Сферу деятельности.`;
-          const kzLine = plural
-            ? `\n\nҚаласаңыз, келесі тақырыптар бойынша консультация дайындаймын: ${topicLabel}. Ол үшін Атыңызды, Қалаңызды және Сфераңызды жазыңыз.`
-            : `\n\nҚаласаңыз, ${topicLabel} бойынша консультация дайындаймын. Ол үшін Атыңызды, Қалаңызды және Сфераңызды жазыңыз.`;
-          const enLine = plural
-            ? `\n\nIf you want, I’ll arrange a consultation on these topics: ${topicLabel}. Please send your Name, City and Business field.`
-            : `\n\nIf you want, I’ll arrange a consultation on: ${topicLabel}. Please send your Name, City and Business field.`;
-
-          reply = (reply || "").trim() + (lang === "kz" ? kzLine : lang === "en" ? enLine : ruLine);
-
-          await setLastOffer(waId, topicLabel); // сохраняем всю строку тем
-          booking.topic = topicLabel;
-          await setBooking(waId, booking);
-        } else if (!booking.stage && topicsNow.length === 0 && replyTopics.length === 1) {
-          await setLastOffer(waId, replyTopics[0]);
-        }
+         const replyTopics = guessTopicsAll(reply);
+         
+         if (!booking.stage && topicsNow.length > 0) {
+           const topicLabel = COMBINE_MULTI_TOPICS ? topicsNow.join(", ") : topicsNow[0];
+           const plural = (topicsNow.length > 1);
+         
+           // если контакт полный — меняем формулировку
+           const haveContact = isContactComplete(contact);
+         
+           const ruLine = haveContact
+             ? `\n\nУ меня уже есть ваши Имя, Город и Сфера. Передать менеджеру по теме: ${topicLabel}? Если да — напишите «Да».`
+             : (plural
+                 ? `\n\nЕсли хотите, подготовлю консультацию по темам: ${topicLabel}. Для этого пришлите Имя, Город и Сферу деятельности.`
+                 : `\n\nЕсли хотите, подготовлю консультацию по теме: ${topicLabel}. Для этого пришлите Имя, Город и Сферу деятельности.`);
+         
+           const kzLine = haveContact
+             ? `\n\nСіз туралы Имя, Қала және Сфера мәліметтері бар. ${topicLabel} тақырыбы бойынша менеджерге жіберейін бе? Иә десеңіз — «Иә» деп жазыңыз.`
+             : (plural
+                 ? `\n\nҚаласаңыз, келесі тақырыптар бойынша консультация дайындаймын: ${topicLabel}. Ол үшін Атыңызды, Қалаңызды және Сфераңызды жазыңыз.`
+                 : `\n\nҚаласаңыз, ${topicLabel} бойынша консультация дайындаймын. Ол үшін Атыңызды, Қалаңызды және Сфераңызды жазыңыз.`);
+         
+           const enLine = haveContact
+             ? `\n\nI already have your Name, City and Field. Should I pass this to a manager about: ${topicLabel}? If yes — reply “Yes”.`
+             : (plural
+                 ? `\n\nIf you want, I’ll arrange a consultation on these topics: ${topicLabel}. Please send your Name, City and Business field.`
+                 : `\n\nIf you want, I’ll arrange a consultation on: ${topicLabel}. Please send your Name, City and Business field.`);
+         
+           reply = (reply || "").trim() + (lang === "kz" ? kzLine : lang === "en" ? enLine : ruLine);
+         
+           await setLastOffer(waId, topicLabel);
+           // сохраним тему в booking; если контакт полный — сразу подставим его, чтобы далее сработала автофинализация
+           booking.topic = topicLabel;
+           if (haveContact) {
+             if (!booking.name)   booking.name   = contact.name;
+             if (!booking.city)   booking.city   = contact.city;
+             if (!booking.sphere) booking.sphere = contact.sphere;
+           }
+           await setBooking(waId, booking);
+         } else if (!booking.stage && topicsNow.length === 0 && replyTopics.length === 1) {
+           await setLastOffer(waId, replyTopics[0]);
+         }
 
         if (!reply || reply.trim().length < 3) {
           reply = (lang === "ru") ? "Готово. Чем ещё помочь?"

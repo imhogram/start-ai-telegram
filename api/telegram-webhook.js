@@ -21,17 +21,83 @@ const LAST_OFFER_KEY = (chatId) => `last_offer:${chatId}`; // { topic, ts }
 const LAST_TS_KEY = (chatId) => `last_ts:${chatId}`;       // unix ms
 
 // Настройки
-const COMBINE_MULTI_TOPICS = true;        // объединять темы в одну заявку
-const OFFER_COOLDOWN_MS = 75 * 1000;      // кулдаун оффера (мягкое приглашение)
-const INACTIVITY_NUDGE_MS = 60 * 1000;    // авто-напоминание при молчании
+const COMBINE_MULTI_TOPICS = true;
+const OFFER_COOLDOWN_MS = 75 * 1000;
+const INACTIVITY_NUDGE_MS = 60 * 1000;
 
-// Локальный таймер на процесс (best-effort для non-serverless сред)
-const NUDGE_TIMERS = new Map(); // chatId -> NodeJS.Timeout
+// Локальный таймер (best-effort вне serverless)
+const NUDGE_TIMERS = new Map();
 
 /* =========================
    БЛОК УСЛУГ
    ========================= */
 const SERVICES_TEXT = `
+- логотип и стиль:
+-- Разработка логотипа и фирменного стиля, определяющего образ компании:
+--- отражение миссии и деятельности компании;
+--- разработка в соответствии с современными трендами;
+--- смысловая нагрузка в соответствии с психологией целевой аудитории;
+--- учет индивидуальности личности заказчика.
+- брендбук:
+-- Документация правил использования фирменного стиля:
+--- схема и правила использования логотипа;
+--- варианты фирменного блока (знак, наименование, слоган);
+--- стиль в документообороте (визитки, бланки, папки и т.д.);
+--- наружная реклама (вывеска, билборд);
+--- печатная реклама (флаер, буклет, рекламный проспект);
+--- выставочные материалы (напольный баннер, дизайн стенда);
+--- оформление офиса (декор-элементы в фирменном стиле);
+--- сувенирная продукция (ручки, блокноты, кружки, кепки, пакеты).
+- разработка сайта:
+-- Разработка продуманного сайта для получения заявок от клиентов:
+--- создание схемы сайта с учетом стратегического развития;
+--- отработка логики ведения пользователей и конверсионной воронки;
+--- разработка дизайна сайта в соответствии с фирменным стилем;
+--- разработка функционала для удобства пользователей;
+--- программирование сайта с панелью для самостоятельного управления;
+--- разработка и оптимизация мобильной версии;
+--- CEO-оптимизация для повышения позиций в поисковиках.
+- реклама в интернете:
+-- Настройка рекламы в 2ГИС, OLX, объявлений в Google и таргета в Instagram:
+--- создание привлекательного профиля в 2ГИС, выбор рекламных инструментов;
+--- создание рабочих объявлений в OLX, выбор рекламных инструментов;
+--- настройка поисковых объявлений в Google;
+--- запуск контекстно-медийной сети (реклама в приложениях);
+--- анализ ключевых фраз для повышения эффективности и оптимизации бюджета;
+--- дизайн необходимых рекламных макетов;
+--- профессиональная настройка таргетированной рекламы;
+--- создание рекламных видеороликов по продуктам;
+--- аналитика эффективности интернет-рекламы.
+- SMM продвижение:
+-- Полноценное ведение профильной странички в инстаграм (рабочей или личного бренда):
+--- разработка стратегии продвижения бренда;
+--- составление контент-плана на 1 месяц вперед;
+--- профессиональная настройка профиля в Instagram;
+--- создание собственной PR-стилистики;
+--- создание контента (видеосъемка и дизайн макетов);
+--- стабильное размещение контента (посты, reels, stories);
+--- аналитика эффективности ведения профиля.
+- отдел продаж / call-center:
+--- Создание или реорганизация отдела продаж, внедрение и адаптация:
+--- анализ текущей ситуации по продажам в компании;
+--- выявление преимуществ продукта и самой компании;
+--- составление скриптов и коммерческих предложений;
+--- внедрение системы холодных продаж;
+--- обучение персонала навыкам удержания обращений;
+--- разработка и внедрение мотивационной системы (ЗП, бонусы, KPI);
+--- обучение менеджеров ведению продаж в CRM-системе;
+--- настройка этапов и воронок продаж в CRM.
+- CRM, автоматизация, ИИ:
+-- Перевод всей команды в CRM Битрикс24 для прозрачности и эффективной работы:
+--- регистрация и настройка компании в crm-системе Битрикс24;
+--- регистрация сотрудников и создание структуры компании;
+--- настройка прав пользователей согласно должностей;
+--- интеграция и настройка SIP-телефонии, ответственных и записи;
+--- интеграция и настройка WhatsApp, Telegram, Instagram, OLX, чат на сайте, форм заявок с сайта;
+--- настройка этапов и воронок продаж, смена ответственных;
+--- автоматизация бизнес-процессов (задачи, дела, сроки, напоминания);
+--- разработка и обучение ИИ чат-бота для быстрой обработки обращений клиентов 24/7;
+--- настройка сквозной аналитики для оценки эффективности рекламы.
 - масштабирование идеи:
 -- Раскрытие потенциала существующей или планируемой компании:
 --- определение наилучшего плана реализации вашего проекта;
@@ -123,72 +189,6 @@ const SERVICES_TEXT = `
 --- оптимизация текущей работы и внедрение эффективных методов;
 --- разработка обязанностей и регламентов работы сотрудников;
 --- автоматизация бизнес-процессов посредством CRM-системы.
-- логотип и стиль:
--- Разработка логотипа и фирменного стиля, определяющего образ компании:
---- отражение миссии и деятельности компании;
---- разработка в соответствии с современными трендами;
---- смысловая нагрузка в соответствии с психологией целевой аудитории;
---- учет индивидуальности личности заказчика.
-- брендбук:
--- Документация правил использования фирменного стиля:
---- схема и правила использования логотипа;
---- варианты фирменного блока (знак, наименование, слоган);
---- стиль в документообороте (визитки, бланки, папки и т.д.);
---- наружная реклама (вывеска, билборд);
---- печатная реклама (флаер, буклет, рекламный проспект);
---- выставочные материалы (напольный баннер, дизайн стенда);
---- оформление офиса (декор-элементы в фирменном стиле);
---- сувенирная продукция (ручки, блокноты, кружки, кепки, пакеты).
-- разработка сайта:
--- Разработка продуманного сайта для получения заявок от клиентов:
---- создание схемы сайта с учетом стратегического развития;
---- отработка логики ведения пользователей и конверсионной воронки;
---- разработка дизайна сайта в соответствии с фирменным стилем;
---- разработка функционала для удобства пользователей;
---- программирование сайта с панелью для самостоятельного управления;
---- разработка и оптимизация мобильной версии;
---- CEO-оптимизация для повышения позиций в поисковиках.
-- реклама в интернете:
--- Настройка рекламы в 2ГИС, OLX, объявлений в Google и таргета в Instagram:
---- создание привлекательного профиля в 2ГИС, выбор рекламных инструментов;
---- создание рабочих объявлений в OLX, выбор рекламных инструментов;
---- настройка поисковых объявлений в Google;
---- запуск контекстно-медийной сети (реклама в приложениях);
---- анализ ключевых фраз для повышения эффективности и оптимизации бюджета;
---- дизайн необходимых рекламных макетов;
---- профессиональная настройка таргетированной рекламы;
---- создание рекламных видеороликов по продуктам;
---- аналитика эффективности интернет-рекламы.
-- SMM ведение:
--- Полноценное ведение профильной странички в инстаграм (рабочей или личного бренда):
---- разработка стратегии продвижения бренда;
---- составление контент-плана на 1 месяц вперед;
---- профессиональная настройка профиля в Instagram;
---- создание собственной PR-стилистики;
---- создание контента (видеосъемка и дизайн макетов);
---- стабильное размещение контента (посты, reels, stories);
---- аналитика эффективности ведения профиля.
-- отдел продаж:
---- Создание или реорганизация отдела продаж, внедрение и адаптация:
---- анализ текущей ситуации по продажам в компании;
---- выявление преимуществ продукта и самой компании;
---- составление скриптов и коммерческих предложений;
---- внедрение системы холодных продаж;
---- обучение персонала навыкам удержания обращений;
---- разработка и внедрение мотивационной системы (ЗП, бонусы, KPI);
---- обучение менеджеров ведению продаж в CRM-системе;
---- настройка этапов и воронок продаж в CRM.
-- CRM, автоматизация, ИИ:
--- Перевод всей команды в CRM Битрикс24 для прозрачности и эффективной работы:
---- регистрация и настройка компании в crm-системе Битрикс24;
---- регистрация сотрудников и создание структуры компании;
---- настройка прав пользователей согласно должностей;
---- интеграция и настройка SIP-телефонии, ответственных и записи;
---- интеграция и настройка WhatsApp, Telegram, Instagram, OLX, чат на сайте, форм заявок с сайта;
---- настройка этапов и воронок продаж, смена ответственных;
---- автоматизация бизнес-процессов (задачи, дела, сроки, напоминания);
---- разработка и обучение ИИ чат-бота для быстрой обработки обращений клиентов 24/7;
---- настройка сквозной аналитики для оценки эффективности рекламы.
 - франчайзинг:
 -- Разработка и упаковка во франшизу действующего или нового бизнеса:
 --- сбор информации и создание концепции франшизы;
@@ -231,7 +231,7 @@ async function pushHistory(chatId, role, content) {
   await redis.ltrim(`hist:${chatId}`, -HISTORY_LEN, -1);
 }
 
-/* Слоты заявки — добавили pendingTopics и offerCooldownTs */
+/* Слоты заявки */
 async function getBooking(chatId) {
   const val = await redis.get(BOOK_KEY(chatId));
   if (!val) return { stage: null, topic: null, name: null, phone: null, pendingTopics: [], offerCooldownTs: 0 };
@@ -346,7 +346,7 @@ function normalizeName(name) {
   return s.trim();
 }
 
-/* Извлечение имени (консервативное) */
+/* Извлечение имени */
 function extractName(text) {
   if (!text) return null;
   const src = text.replace(/[\u00A0\u202F\u2009]/g, " ").replace(/\s+/g, " ").trim();
@@ -365,7 +365,6 @@ function extractName(text) {
     if (tokens.every(t => !NAME_STOP.has(t.toLowerCase()))) return normalizeName(cand);
   }
 
-  // Разрешаем 1–2 токена имени только если в сообщении есть телефон
   if (hasPhone(src)) {
     const beforePhone = src.split(/[\+\d][\d\-\s().]{5,}/)[0] || src;
     const tokens = beforePhone.split(/[•,;\n]+/).join(" ").split(/\s+/).filter(Boolean);
@@ -406,8 +405,8 @@ const TOPIC_PATTERNS = [
   { re: /(маркетолог|gtm|go.?to.?market|стратегия\s*продвижения)/i, topic: "Маркетинг/реклама" },
 ];
 
-// Маркеры замены/отмены прежних тем
-const NEGATE_RE = /\b(нет|не\s*нужн[оа]|не\s*надо|не\s*то|не\s*это|не\s*интересует|только|лишь|скорее|лучше)\b/iu;
+// замена/отмена прежних тем — БЕЗ \b
+const NEGATE_RE = /(нет|не\s*нужн[оа]|не\s*надо|не\s*то|не\s*это|не\s*интересует|только|лишь|скорее|лучше)/iu;
 
 function guessTopicsAll(userText) {
   const u = (userText || "").toLowerCase();
@@ -416,7 +415,7 @@ function guessTopicsAll(userText) {
   return Array.from(set);
 }
 
-/* Автозаполнение из текущего сообщения + накопление тем */
+/* Автозаполнение из сообщения + накопление тем */
 async function tryAutofillFrom(chatId, booking, userText) {
   const nameHit = extractName(userText);
   if (!booking.name && nameHit && isNameLike(nameHit)) booking.name = nameHit;
@@ -485,9 +484,9 @@ const L = {
     en: "History and booking cleared. Let’s start over.",
   },
   nudgeNoContacts: {
-    ru: "Вы можете написать своё Имя и Телефон, чтобы я отправил заявку специалисту. Или обратитесь к нам по телефону 87776662115. Не забудьте посетить наши сайты https://strateg.kz и http://aidarova.kz",
-    kz: "Өтінішті жіберу үшін есіміңіз бен телефон нөміріңізді жаза аласыз. Немесе 87776662115 нөміріне қоңырау шалыңыз. Біздің сайттар: https://strateg.kz және http://aidarova.kz",
-    en: "You can send your Name and Phone so I can submit a request to a specialist. Or call us at 87776662115. Also visit our websites: https://strateg.kz and http://aidarova.kz",
+    ru: "Могу оформить консультацию — просто отправьте Имя и Телефон. Если удобнее, напишите позже — я подожду здесь.",
+    kz: "Консультацияға жаздыра аламын — Атыңыз бен Телефонды жіберіңіз. Қажет болса, кейін жазыңыз — осында күтемін.",
+    en: "I can arrange a consultation — just send your Name and Phone. If easier, message me later — I’ll be here.",
   },
   langSet: (lang) =>
     ({
@@ -502,22 +501,29 @@ const L = {
   },
 };
 
-/* Реквизиты компании */
+/* Реквизиты компании (НЕ кладём в системный промпт) */
 const COMPANY_INFO = {
   address: "г. Астана, шоссе Коргалжын, 3, БЦ SMART, 4 этаж, офис 405",
   phone: "+77776662115",
-  worktime: "Пн–Пт, 10:00–18:00",
-  site: "www.strateg.kz и www.aidarova.kz"
+  siteA: "https://strateg.kz",
+  siteB: "http://aidarova.kz",
 };
 
-/* Системный промпт */
+/* Явный запрос контактов? */
+function isContactRequest(text) {
+  const t = (text || "").toLowerCase();
+  return /(как\s*(свя|обрат)|телефон|номер|контакт|адрес|офис|сайт|site|website|link|ссылк)/i.test(t);
+}
+
+/* Системный промпт — без контактов; запрет показывать контакты без прямого запроса */
 const baseSystemPrompt = `
 Ты — ИИ-ассистент компании START (г. Астана).
-Кратко и по делу консультируй ТОЛЬКО по услугам из блока SERVICES_TEXT ниже, затем уместно предложи консультацию при интересе пользователя.
+Отвечай кратко и по делу ТОЛЬКО по услугам из блока SERVICES_TEXT ниже.
+Если у пользователя есть интерес, предложи консультацию и помоги оформить заявку в чате (Имя + Телефон).
+НЕ ОТПРАВЛЯЙ телефон, адрес, сайты и призывы "позвоните/приходите/перейдите на сайт", ЕСЛИ пользователь прямо этого не попросил.
 Не используй в приветствии слова «сегодня/today».
-Никогда не проси/не упоминай время, дату или согласование времени. Этим займётся менеджер позже.
-Если спрашивают про цены/сроки — отвечай, что расчёт индивидуальный после консультации (не выдумывай суммы/сроки).
-Адрес: ${COMPANY_INFO.address}. Телефон: ${COMPANY_INFO.phone}. Время работы: ${COMPANY_INFO.worktime}.  Наши сайты: ${COMPANY_INFO.site}.
+Никогда не проси/не упоминай время, дату или согласование времени — этим займётся менеджер.
+Если спрашивают про цены/сроки — отвечай, что расчёт индивидуальный после консультации.
 Полный перечень услуг: см. блок SERVICES_TEXT (используй ТОЛЬКО эти услуги).
 `;
 
@@ -540,44 +546,25 @@ async function sendTG(chatId, text) {
 }
 
 /* =========================
-   NUDGE (60s) — планировщик/овердью
+   NUDGE (60s)
    ========================= */
 async function scheduleNudge(chatId, lang) {
-  // Сохраняем "последнюю активность" в Redis
   const now = Date.now();
   await redis.set(LAST_TS_KEY(chatId), String(now), { ex: 60 * 60 });
 
-  // Сброс локального таймера
-  if (NUDGE_TIMERS.has(chatId)) {
-    clearTimeout(NUDGE_TIMERS.get(chatId));
-  }
+  if (NUDGE_TIMERS.has(chatId)) clearTimeout(NUDGE_TIMERS.get(chatId));
 
-  // Новый таймер (best-effort)
   const t = setTimeout(async () => {
     try {
       const storedTs = await redis.get(LAST_TS_KEY(chatId));
       const contact = await getContact(chatId);
       if (!storedTs) return;
       const lastTs = Number(storedTs);
-      if (Date.now() - lastTs < INACTIVITY_NUDGE_MS - 2000) return; // была активность
-      if (contact && contact.phone) return; // контакты уже есть
+      if (Date.now() - lastTs < INACTIVITY_NUDGE_MS - 2000) return;
+      if (contact && contact.phone) return;
 
-      const booking = await getBooking(chatId);
       const msg = L.nudgeNoContacts[lang] || L.nudgeNoContacts.ru;
       await sendTG(chatId, msg);
-
-      const topics = (booking && booking.pendingTopics && booking.pendingTopics.length)
-        ? booking.pendingTopics.join(", ")
-        : (booking && booking.topic) || null;
-
-      if (topics) {
-        const tail = (lang === "kz")
-          ? `\n\nҚаласаңыз, ${topics} бойынша консультацияға жазамын. Есіміңіз бен телефонды жазыңыз.`
-          : (lang === "en")
-          ? `\n\nIf you want, I can arrange a consultation on: ${topics}. Send your Name and Phone.`
-          : `\n\nЕсли хотите, оформлю консультацию по теме: ${topics}. Напишите Имя и Телефон.`;
-        await sendTG(chatId, tail);
-      }
     } catch (e) {
       console.error("nudge timer error", e);
     } finally {
@@ -589,7 +576,6 @@ async function scheduleNudge(chatId, lang) {
 }
 
 async function maybeFireOverdueNudge(chatId, lang) {
-  // Для serverless: если таймер не сработал — отправим «лениво» при следующем апдейте
   const storedTs = await redis.get(LAST_TS_KEY(chatId));
   if (!storedTs) return;
   const lastTs = Number(storedTs);
@@ -598,24 +584,8 @@ async function maybeFireOverdueNudge(chatId, lang) {
   const contact = await getContact(chatId);
   if (contact && contact.phone) return;
 
-  const booking = await getBooking(chatId);
   const msg = L.nudgeNoContacts[lang] || L.nudgeNoContacts.ru;
   await sendTG(chatId, msg);
-
-  const topics = (booking && booking.pendingTopics && booking.pendingTopics.length)
-    ? booking.pendingTopics.join(", ")
-    : (booking && booking.topic) || null;
-
-  if (topics) {
-    const tail = (lang === "kz")
-      ? `\n\nҚаласаңыз, ${topics} бойынша консультацияға жазамын. Есіміңіз бен телефонды жазыңыз.`
-      : (lang === "en")
-      ? `\n\nIf you want, I can arrange a consultation on: ${topics}. Send your Name and Phone.`
-      : `\n\nЕсли хотите, оформлю консультацию по теме: ${topics}. Напишите Имя и Телефон.`;
-    await sendTG(chatId, tail);
-  }
-
-  // Обновляем last_ts, чтобы не спамить
   await redis.set(LAST_TS_KEY(chatId), String(Date.now()), { ex: 60 * 60 });
 }
 
@@ -646,13 +616,10 @@ export default async function handler(req, res) {
     const chatId = message.chat.id;
     const userText = (message.text || "").trim();
 
-    // Язык на ранней стадии (нужен для «ленивого» нуджа)
+    // Язык
     const currentLangStored = (await redis.get(LANG_KEY(chatId))) || detectLang(userText) || "ru";
-
-    // «Ленивый» нудж, если прошлый таймер не отработал и есть просрочка
     await maybeFireOverdueNudge(chatId, currentLangStored);
 
-    // Обновим маркер активности и поставим нудж-таймер (если контактов нет)
     const contactAtStart = await getContact(chatId);
     if (!contactAtStart || !contactAtStart.phone) {
       await scheduleNudge(chatId, currentLangStored);
@@ -665,7 +632,7 @@ export default async function handler(req, res) {
     }
 
     /* Команды */
-    if (/^\/lang\b/i.test(userText)) {
+    if (/^\/lang/i.test(userText)) {
       const parts = userText.split(/\s+/);
       const code = (parts[1] || "").toLowerCase();
       if (code === "ru" || code === "kz" || code === "en") {
@@ -673,7 +640,7 @@ export default async function handler(req, res) {
         await sendTG(chatId, L.langSet(code));
       } else {
         const current = (await redis.get(LANG_KEY(chatId))) || detectLang(userText) || "ru";
-        await sendTG(chatId, L.unknownLang[current] || L.unknownLang.ru);
+        await sendTG(chatId, (L.unknownLang[current] || L.unknownLang.ru));
       }
       res.statusCode = 200;
       return res.end(JSON.stringify({ ok: true }));
@@ -709,17 +676,6 @@ export default async function handler(req, res) {
       res.statusCode = 200;
       return res.end(JSON.stringify({ ok: true }));
     }
-    if (userText === "/pingadmin") {
-      const adminId = getAdminId();
-      if (!adminId) {
-        await sendTG(chatId, "ADMIN_CHAT_ID не задан");
-      } else {
-        await sendTG(adminId, "✅ Тест: сообщение администратору из бота");
-        await sendTG(chatId, `Отправил тест админу: ${adminId}`);
-      }
-      res.statusCode = 200;
-      return res.end(JSON.stringify({ ok: true }));
-    }
 
     /* Слоты/контакты */
     const booking = await getBooking(chatId);
@@ -727,55 +683,73 @@ export default async function handler(req, res) {
     let handled = false;
     let preReply = null;
 
-    // Подхват из текущего сообщения (имя/тел/темы)
+    // Подхват (имя/тел/темы)
     await tryAutofillFrom(chatId, booking, userText);
 
-    // Если пользователь отрицанием заменил темы — мягко подтвердим переключение
+    // Контакт-запрос — разрешаем дать реквизиты по запросу
+    if (isContactRequest(userText)) {
+      const msg =
+        `Контакты для связи:\n` +
+        `Телефон: ${COMPANY_INFO.phone}\n` +
+        `Адрес: ${COMPANY_INFO.address}\n` +
+        `Сайты: ${COMPANY_INFO.siteA}, ${COMPANY_INFO.siteB}`;
+      await sendTG(chatId, msg);
+      await redis.set(LAST_TS_KEY(chatId), String(Date.now()), { ex: 60 * 60 });
+      // Не завершаем — пусть дальше работает обычная логика (может захотеть оформить заявку)
+    }
+
+    // Переключение тем
     if (NEGATE_RE.test(userText) && guessTopicsAll(userText).length) {
       const newLabel = COMBINE_MULTI_TOPICS
         ? Array.from(new Set(guessTopicsAll(userText))).join(", ")
         : guessTopicsAll(userText)[0];
-
       const confirmSwitch =
         lang === "kz"
           ? `Түсіндім: ${newLabel} керек.`
           : (lang === "en"
               ? `Got it: focusing on ${newLabel}.`
               : `Понял: переключаюсь на «${newLabel}».`);
-
       await sendTG(chatId, confirmSwitch);
       await pushHistory(chatId, "assistant", confirmSwitch);
       await redis.set(LAST_TS_KEY(chatId), String(Date.now()), { ex: 60 * 60 });
     }
 
-    // 0) Первое сообщение — фиксированное приветствие
+    // Первое сообщение: приветствие + сразу мини-ответ, если уже есть тема
     const historyBefore = await getHistory(chatId);
     if (historyBefore.length === 0) {
       const hi = L.hi[lang] || L.hi.ru;
+      const firstTopics = guessTopicsAll(userText);
       await pushHistory(chatId, "user", userText);
       await pushHistory(chatId, "assistant", hi);
       await sendTG(chatId, hi);
+
+      if (firstTopics.length) {
+        const short =
+          lang === "kz" ? "Иә, көмектесе аламын. Қысқаша айтайын." :
+          lang === "en" ? "Yes, we can help. Briefly:" :
+          "Да, можем помочь. Коротко:";
+        await pushHistory(chatId, "assistant", short);
+        await sendTG(chatId, short);
+      }
+
       await redis.set(LAST_TS_KEY(chatId), String(Date.now()), { ex: 60 * 60 });
       res.statusCode = 200;
       return res.end(JSON.stringify({ ok: true }));
     }
 
-    // ===== «УМНОЕ СОГЛАСИЕ» =====
-    const consentRe = /\b(давайте|давай|хочу|нужно|нужна|нужен|оформим|оформить|готов|интересует\s*консультац|поехали|запишите|записать|ну\s*да|ага|угу|ок|окей|ok|okey|хорошо|go|да|yes|иә|ия)\b/iu;
+    // ===== «УМНОЕ СОГЛАСИЕ» — БЕЗ \b =====
+    const consentRe = /(давайте|давай|хочу|нужно|нужна|нужен|оформим|оформить|готов|интересует\s*консультац|поехали|запишите|записать|ну\s*да|ага|угу|ок|окей|okay|ok(?:ay)?|хорошо|go|да|yes|иә|ия)/iu;
     if (consentRe.test(userText)) {
       let topicToBook = null;
 
-      // 1) если уже есть накопленные темы — они главнее любого last_offer
       const pending = Array.isArray(booking.pendingTopics) ? booking.pendingTopics : [];
       if (pending.length) {
         topicToBook = COMBINE_MULTI_TOPICS ? pending.join(", ") : pending[0];
       } else {
-        // 2) иначе пытаемся взять свежий last_offer
         const offer = await getLastOffer(chatId);
         const fresh = offer && (Date.now() - (offer.ts || 0) < 10 * 60 * 1000);
         if (fresh && offer.topic) topicToBook = offer.topic;
-      
-        // 3) если и этого нет — фолбэк из истории
+
         if (!topicToBook) {
           const hist = await getHistory(chatId);
           const prevUser = [...hist].filter(h => h.role === "user").slice(-1)[0]?.content || "";
@@ -800,7 +774,6 @@ export default async function handler(req, res) {
         if (finalName && isNameLike(finalName) && finalPhone && phoneOk(finalPhone)) {
           await sendLead(chatId, topicToBook, finalName, finalPhone);
           await setContact(chatId, { name: finalName, phone: finalPhone });
-          // очистка слотов/офферов
           booking.pendingTopics = [];
           booking.topic = null;
           booking.stage = null;
@@ -815,7 +788,6 @@ export default async function handler(req, res) {
           res.statusCode = 200;
           return res.end(JSON.stringify({ ok: true }));
         } else {
-          // не хватает данных — дособираем
           booking.topic = topicToBook;
           booking.stage = decideNextStage({
             ...booking,
@@ -831,7 +803,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 1) Телефон в сообщении — пытаемся закрыть лид (темы уже накоплены)
+    // Телефон в сообщении — попытка закрыть лид
     if (!handled && hasPhone(userText)) {
       booking.phone = pickPhone(userText) || booking.phone;
 
@@ -870,7 +842,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 2) Стадия name
+    // Стадия name
     if (!handled && booking.stage === "name") {
       if (contact && contact.name && contact.phone) {
         const namestr  = normalizeName(contact.name);
@@ -923,7 +895,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // 3) Стадия phone
+    // Стадия phone
     if (!handled && booking.stage === "phone") {
       if (contact && contact.phone && (booking.name || contact.name)) {
         const namestr  = normalizeName(booking.name || contact.name);
@@ -977,7 +949,7 @@ export default async function handler(req, res) {
       }
     }
 
-    /* Если слоты что-то ответили — отправим preReply */
+    // Если слоты ответили — шлём и выходим
     if (handled && preReply) {
       await pushHistory(chatId, "user", userText);
       await pushHistory(chatId, "assistant", preReply);
@@ -1015,16 +987,13 @@ export default async function handler(req, res) {
     const now = Date.now();
     if (!booking.offerCooldownTs) booking.offerCooldownTs = 0;
 
-    // Показываем оффер только если кулдаун прошёл
     const canOffer = (now - (booking.offerCooldownTs || 0)) >= OFFER_COOLDOWN_MS;
 
     if (canOffer && !booking.stage && topicsNow.length > 0) {
-      // если к этому моменту уже накопили pendingTopics — используем их;
-      // иначе — берём темы из текущего сообщения
       const havePending = Array.isArray(booking.pendingTopics) && booking.pendingTopics.length > 0;
       const labelList   = havePending ? booking.pendingTopics : topicsNow;
       const topicLabel  = COMBINE_MULTI_TOPICS ? labelList.join(", ") : labelList[0];
-      
+
       const offerLine = (contact && contact.phone)
         ? (
             lang === "ru"
@@ -1037,23 +1006,18 @@ export default async function handler(req, res) {
             lang === "ru"
               ? `\n\nЕсли хотите, оформлю консультацию по теме: ${topicLabel}. Для этого отправьте Имя и Телефон.`
               : lang === "kz"
-              ? `\n\nҚаласаңыз, ${topicLabel} бойынша консультацияға жазамын. Аты-жөніңіз бен Телефон нөміріңізді жазыңыз.`
-              : `\n\nIf you want, I can arrange a consultation on: ${topicLabel}. You can send your Name and Phone.`
+              ? `\n\nҚаласаңыз, ${topicLabel} бойынша консультацияға жазамын. Атыңыз бен Телефон нөміріңізді жазыңыз.`
+              : `\n\nIf you want, I can arrange a consultation on: ${topicLabel}. Please send your Name and Phone.`
           );
-      
+
       reply = (reply || "").trim() + offerLine;
-      
-      // обновим last_offer по первой теме из labelList (если есть)
-      if (labelList.length) {
-        await setLastOffer(chatId, labelList[0]);
-      }
-      
-      // кулдаун
+
+      if (labelList.length) await setLastOffer(chatId, labelList[0]);
+
       booking.offerCooldownTs = now;
       await setBooking(chatId, booking);
 
     } else if (canOffer && !booking.stage && topicsNow.length === 0 && replyTopics.length === 1) {
-      // Пользователь явно тему не назвал, но ассистент — да. Только обновим last_offer.
       await setLastOffer(chatId, replyTopics[0]);
       booking.offerCooldownTs = now;
       await setBooking(chatId, booking);
@@ -1071,7 +1035,6 @@ export default async function handler(req, res) {
     await pushHistory(chatId, "assistant", reply);
     await sendTG(chatId, reply);
 
-    // продлим маркер активности
     await redis.set(LAST_TS_KEY(chatId), String(Date.now()), { ex: 60 * 60 });
 
     res.statusCode = 200;
@@ -1087,7 +1050,6 @@ export default async function handler(req, res) {
    ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
    ========================= */
 
-// единая отправка заявки админу
 async function sendLead(chatId, topic, name, phone) {
   const adminId = getAdminId();
   const finalTopic = topic || "Консультация";
